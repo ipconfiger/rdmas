@@ -197,6 +197,60 @@ impl RdmaRuntime {
         Ok(wc.is_success())
     }
 
+    /// Async batch post: submits a chain of send work requests.
+    ///
+    /// All WRs in the chain are posted in a single `ibv_post_send` call.
+    /// Only the last WR carries `IBV_SEND_SIGNALED` — a single completion
+    /// is generated for the entire batch.
+    ///
+    /// Returns the `wr_id` of the last WR (matching the completion).
+    pub async fn rdma_batch(
+        &self,
+        wrs: &mut [SendWorkRequest],
+    ) -> Result<u64, RdmaError> {
+        let last_id = wrs.last().map(|w| w.wr_id).unwrap_or(0);
+
+        // Step 1: Create a oneshot channel
+        let (tx, rx) = oneshot::channel();
+
+        // Step 2: Register the sender in the pending map
+        {
+            let mut map = self
+                .pending
+                .lock()
+                .map_err(|_| RdmaError::Internal("Pending map mutex poisoned".to_string()))?;
+            map.insert(last_id, tx);
+        }
+
+        // Step 3: Post the WR chain to the QP
+        if let Err(e) = self.qp.post_send_batch(wrs) {
+            // Clean up: remove the pending entry on failure
+            let mut map = match self.pending.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            map.remove(&last_id);
+            return Err(e);
+        }
+
+        // Step 4: Await the completion
+        let wc = rx.await.map_err(|_| {
+            RdmaError::Internal(format!(
+                "Oneshot channel dropped for batch wr_id={}: poller may have panicked",
+                last_id
+            ))
+        })??;
+
+        if !wc.is_success() {
+            return Err(RdmaError::HardwareError(format!(
+                "batch WC error: status={:?}",
+                wc.status
+            )));
+        }
+
+        Ok(last_id)
+    }
+
     // ------------------------------------------------------------------
     // Internal helpers
     // ------------------------------------------------------------------

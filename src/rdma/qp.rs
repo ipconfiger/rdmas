@@ -297,6 +297,102 @@ impl QueuePair {
         Ok(wr_id)
     }
 
+    /// Post a batch of send work requests as a linked chain.
+    ///
+    /// RDMA allows chaining multiple WRs via the `next` pointer in `ibv_send_wr`.
+    /// All WRs in the chain are submitted with a single `ibv_post_send` call (one
+    /// doorbell ring). Only the LAST WR in the chain gets `IBV_SEND_SIGNALED` —
+    /// a single CQ completion is generated for the entire batch.
+    ///
+    /// # Returns
+    /// The `wr_id` of the LAST WR in the chain (single completion notification).
+    pub fn post_send_batch(&self, wrs: &mut [SendWorkRequest]) -> Result<u64, RdmaError> {
+        if wrs.is_empty() {
+            return Err(RdmaError::Internal("empty batch".into()));
+        }
+
+        // Collect all SGEs — they must outlive the ibv_sge and ibv_send_wr arrays
+        let mut all_sges: Vec<Vec<ibv_sge>> = Vec::with_capacity(wrs.len());
+        let mut send_wrs: Vec<ibv_send_wr> = Vec::with_capacity(wrs.len());
+
+        for wr in wrs.iter() {
+            let sge_entries: Vec<ibv_sge> = wr
+                .sge
+                .iter()
+                .map(|sge| ibv_sge {
+                    addr: sge.addr as u64,
+                    length: sge.length,
+                    lkey: sge.lkey,
+                })
+                .collect();
+            all_sges.push(sge_entries);
+        }
+
+        // Build the WR chain
+        for (i, wr) in wrs.iter().enumerate() {
+            let is_last = i == wrs.len() - 1;
+            let send_flags = if is_last {
+                wr.send_flags | ibv_send_flags::IBV_SEND_SIGNALED as u32
+            } else {
+                wr.send_flags & !(ibv_send_flags::IBV_SEND_SIGNALED as u32)
+            };
+
+            let sges = &all_sges[i];
+            let mut swr = ibv_send_wr {
+                wr_id: wr.wr_id,
+                next: ptr::null_mut(), // Linked below
+                sg_list: if sges.is_empty() {
+                    ptr::null_mut()
+                } else {
+                    sges.as_ptr() as *mut _
+                },
+                num_sge: sges.len() as libc::c_int,
+                opcode: map_send_opcode(&wr.opcode),
+                send_flags,
+                __bindgen_anon_1: unsafe { std::mem::MaybeUninit::zeroed().assume_init() },
+                wr: unsafe { std::mem::MaybeUninit::zeroed().assume_init() },
+                qp_type: unsafe { std::mem::MaybeUninit::zeroed().assume_init() },
+                __bindgen_anon_2: unsafe { std::mem::MaybeUninit::zeroed().assume_init() },
+            };
+
+            // Set op-specific fields
+            match &wr.opcode {
+                SendWrOpcode::RdmaRead | SendWrOpcode::RdmaWrite => {
+                    swr.wr.rdma.remote_addr = wr.remote_addr.unwrap_or(0);
+                    swr.wr.rdma.rkey = wr.remote_rkey.unwrap_or(0);
+                }
+                SendWrOpcode::RdmaCompareSwap => {
+                    swr.wr.atomic.remote_addr = wr.remote_addr.unwrap_or(0);
+                    swr.wr.atomic.compare_add = wr.compare_add.unwrap_or(0);
+                    swr.wr.atomic.swap = wr.swap.unwrap_or(0);
+                    swr.wr.atomic.rkey = wr.remote_rkey.unwrap_or(0);
+                }
+                SendWrOpcode::Send => {}
+            }
+
+            send_wrs.push(swr);
+        }
+
+        // Link the chain: each WR's next points to the next one
+        for i in 0..send_wrs.len() - 1 {
+            send_wrs[i].next = &mut send_wrs[i + 1] as *mut ibv_send_wr;
+        }
+
+        let last_id = wrs.last().unwrap().wr_id;
+        let mut bad_wr: *mut ibv_send_wr = ptr::null_mut();
+
+        let ret = unsafe { ibv_post_send_wr(self.inner, &mut send_wrs[0], &mut bad_wr) };
+
+        if ret != 0 {
+            return Err(RdmaError::HardwareError(format!(
+                "ibv_post_send (batch) failed: ret={}",
+                ret
+            )));
+        }
+
+        Ok(last_id)
+    }
+
     /// Post a receive work request to the receive queue.
     ///
     /// Receive WRs are needed for two-sided operations. For one-sided RDMA

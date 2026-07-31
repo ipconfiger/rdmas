@@ -48,25 +48,21 @@ impl OptimizedClientReader {
 // SGE Batch Posting
 // ---------------------------------------------------------------------------
 
-/// SGE batching support.
+/// Builds chained SendWorkRequests for batch RDMA posting.
 ///
-/// Accumulates multiple work requests into a batch to reduce `post_send`
-/// overhead. In the local simulation, this batches writes to the hash table.
-pub struct BatchWriter {
-    /// Pending operations: (key, value, mode)
-    pending: Vec<BatchEntry>,
-    /// Maximum batch size (default: 64)
+/// In the local simulation, this delegates to single inserts via
+/// [`ClientWriter::insert`](crate::client::write::ClientWriter::insert).
+/// In the distributed version, these are posted as a WR chain
+/// via [`QueuePair::post_send_batch`](crate::rdma::qp::QueuePair::post_send_batch).
+pub struct BatchBuilder {
+    /// Pending write requests: (key, value, mode)
+    pending: Vec<(HashedKey, Vec<u8>, BucketMode)>,
+    /// Maximum batch size
     max_batch: usize,
 }
 
-struct BatchEntry {
-    key: HashedKey,
-    value: Vec<u8>,
-    mode: BucketMode,
-}
-
-impl BatchWriter {
-    /// Create a new batch writer with the given maximum batch size.
+impl BatchBuilder {
+    /// Create a new batch builder with the given maximum batch size.
     pub fn new(max_batch: usize) -> Self {
         Self {
             pending: Vec::with_capacity(max_batch),
@@ -77,10 +73,10 @@ impl BatchWriter {
     /// Add a write to the batch.
     ///
     /// Does **not** automatically flush when the batch is full; the caller
-    /// should check [`is_full`](Self::is_full) and call [`flush`](Self::flush)
+    /// should check [`is_full`](Self::is_full) and call [`flush_local`](Self::flush_local)
     /// explicitly.
     pub fn add(&mut self, key: HashedKey, value: Vec<u8>, mode: BucketMode) {
-        self.pending.push(BatchEntry { key, value, mode });
+        self.pending.push((key, value, mode));
     }
 
     /// Check if the batch is at or above capacity.
@@ -98,27 +94,27 @@ impl BatchWriter {
         self.pending.is_empty()
     }
 
-    /// Flush all pending writes to the hash table.
+    /// Flush all pending writes via local `ClientWriter::insert`.
     ///
-    /// Reborrows `large_objects` on each iteration so that the same region
-    /// can be reused across multiple extent-mode writes in a single batch.
+    /// In LOCAL simulation mode, each entry is inserted individually.
+    /// In DISTRIBUTED mode, a WR chain is built and posted via
+    /// `qp.post_send_batch`.
     ///
     /// Returns the number of writes that succeeded (inserted without error).
-    pub fn flush(
+    pub fn flush_local(
         &mut self,
         buckets: &mut [HashBucket],
-        large_objects: &mut Option<&mut LargeObjectRegion>,
+        mut large_objects: Option<&mut LargeObjectRegion>,
         bucket_count: u64,
     ) -> usize {
         let mut success = 0;
-        for entry in self.pending.drain(..) {
-            let lo = large_objects.as_deref_mut();
+        for (key, value, mode) in self.pending.drain(..) {
             let result = crate::client::write::ClientWriter::insert(
-                &entry.key,
-                &entry.value,
-                entry.mode,
+                &key,
+                &value,
+                mode,
                 buckets,
-                lo,
+                large_objects.as_deref_mut(),
                 bucket_count,
             );
             if matches!(result, Ok(WriteResult::Inserted { .. })) {
@@ -282,65 +278,64 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // BatchWriter tests
+    // BatchBuilder tests
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_batch_writer_new_is_empty() {
-        let writer = BatchWriter::new(4);
-        assert!(writer.is_empty());
-        assert_eq!(writer.len(), 0);
-        assert!(!writer.is_full());
+    fn test_batch_builder_new_is_empty() {
+        let builder = BatchBuilder::new(4);
+        assert!(builder.is_empty());
+        assert_eq!(builder.len(), 0);
+        assert!(!builder.is_full());
     }
 
     #[test]
-    fn test_batch_writer_add_and_count() {
-        let mut writer = BatchWriter::new(4);
+    fn test_batch_builder_add_and_count() {
+        let mut builder = BatchBuilder::new(4);
         for i in 0u32..4 {
-            writer.add(
+            builder.add(
                 make_key(&format!("k{i}")),
                 i.to_le_bytes().to_vec(),
                 BucketMode::Inline,
             );
         }
 
-        assert_eq!(writer.len(), 4);
-        assert!(writer.is_full());
-        assert!(!writer.is_empty());
+        assert_eq!(builder.len(), 4);
+        assert!(builder.is_full());
+        assert!(!builder.is_empty());
     }
 
     #[test]
-    fn test_batch_writer_exceeds_capacity_becomes_full() {
-        let mut writer = BatchWriter::new(2);
-        writer.add(make_key("a"), vec![1], BucketMode::Inline);
-        assert!(!writer.is_full());
-        writer.add(make_key("b"), vec![2], BucketMode::Inline);
-        assert!(writer.is_full());
-        writer.add(make_key("c"), vec![3], BucketMode::Inline);
-        assert!(writer.is_full()); // still full
-        assert_eq!(writer.len(), 3);
+    fn test_batch_builder_exceeds_capacity_becomes_full() {
+        let mut builder = BatchBuilder::new(2);
+        builder.add(make_key("a"), vec![1], BucketMode::Inline);
+        assert!(!builder.is_full());
+        builder.add(make_key("b"), vec![2], BucketMode::Inline);
+        assert!(builder.is_full());
+        builder.add(make_key("c"), vec![3], BucketMode::Inline);
+        assert!(builder.is_full()); // still full
+        assert_eq!(builder.len(), 3);
     }
 
     #[test]
-    fn test_batch_writer_flush_to_empty_buckets() {
+    fn test_batch_builder_flush_to_empty_buckets() {
         let mut buckets = vec![HashBucket::zeroed(); 8];
         let bucket_count = buckets.len() as u64;
-        let mut writer = BatchWriter::new(4);
-        let mut large_objects: Option<&mut LargeObjectRegion> = None;
+        let mut builder = BatchBuilder::new(4);
 
         let key0 = make_key("a");
         let key1 = make_key("b");
         let key2 = make_key("c");
 
-        writer.add(key0.clone(), b"val-a".to_vec(), BucketMode::Inline);
-        writer.add(key1.clone(), b"val-b".to_vec(), BucketMode::Inline);
-        writer.add(key2.clone(), b"val-c".to_vec(), BucketMode::Inline);
+        builder.add(key0.clone(), b"val-a".to_vec(), BucketMode::Inline);
+        builder.add(key1.clone(), b"val-b".to_vec(), BucketMode::Inline);
+        builder.add(key2.clone(), b"val-c".to_vec(), BucketMode::Inline);
 
-        let flushed = writer.flush(&mut buckets, &mut large_objects, bucket_count);
+        let flushed = builder.flush_local(&mut buckets, None, bucket_count);
 
         assert_eq!(flushed, 3);
-        assert!(writer.is_empty());
-        assert_eq!(writer.len(), 0);
+        assert!(builder.is_empty());
+        assert_eq!(builder.len(), 0);
 
         // Verify keys are findable via ClientReader.
         for (key, expected) in &[
@@ -361,33 +356,31 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_writer_flush_returns_zero_when_empty() {
+    fn test_batch_builder_flush_returns_zero_when_empty() {
         let mut buckets = vec![HashBucket::zeroed(); 8];
         let bucket_count = buckets.len() as u64;
-        let mut writer = BatchWriter::new(4);
-        let mut large_objects: Option<&mut LargeObjectRegion> = None;
+        let mut builder = BatchBuilder::new(4);
 
-        let flushed = writer.flush(&mut buckets, &mut large_objects, bucket_count);
+        let flushed = builder.flush_local(&mut buckets, None, bucket_count);
         assert_eq!(flushed, 0);
     }
 
     #[test]
-    fn test_batch_writer_flush_with_extent() {
+    fn test_batch_builder_flush_with_extent() {
         let mut buckets = vec![HashBucket::zeroed(); 8];
         let bucket_count = buckets.len() as u64;
         let mut region = LargeObjectRegion::new(4096);
-        let mut writer = BatchWriter::new(4);
+        let mut builder = BatchBuilder::new(4);
 
         let key = make_key("extent-key");
         let data = vec![0xABu8; 200];
 
-        writer.add(key.clone(), data.clone(), BucketMode::Extent);
+        builder.add(key.clone(), data.clone(), BucketMode::Extent);
 
-        let mut large_objects = Some(&mut region);
-        let flushed = writer.flush(&mut buckets, &mut large_objects, bucket_count);
+        let flushed = builder.flush_local(&mut buckets, Some(&mut region), bucket_count);
 
         assert_eq!(flushed, 1);
-        assert!(writer.is_empty());
+        assert!(builder.is_empty());
 
         // Read back via ClientReader + region.
         let result = crate::client::read::ClientReader::get(
@@ -403,33 +396,32 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_writer_flush_partial_success_table_full() {
+    fn test_batch_builder_flush_partial_success_table_full() {
         // Create a tiny 4-bucket table; insert many keys to hit TableFull.
         let mut buckets = vec![HashBucket::zeroed(); 4];
         let bucket_count = buckets.len() as u64;
-        let mut writer = BatchWriter::new(8);
-        let mut large_objects: Option<&mut LargeObjectRegion> = None;
+        let mut builder = BatchBuilder::new(8);
 
         for i in 0..32u64 {
             let hash = 0x1000 + i;
             let mut digest = [0u8; 16];
             digest[0..8].copy_from_slice(&hash.to_le_bytes());
             let key = HashedKey { hash, digest };
-            writer.add(key, hash.to_le_bytes().to_vec(), BucketMode::Inline);
+            builder.add(key, hash.to_le_bytes().to_vec(), BucketMode::Inline);
         }
 
-        let flushed = writer.flush(&mut buckets, &mut large_objects, bucket_count);
+        let flushed = builder.flush_local(&mut buckets, None, bucket_count);
         // With 4 buckets and aggressive kick chains, some entries succeed
         // but not all 32 (limited by MAX_KICK and table capacity).
         assert!(flushed < 32, "should not fit all 32 entries in 4 buckets");
     }
 
     #[test]
-    fn test_batch_writer_is_full_at_exact_capacity() {
-        let mut writer = BatchWriter::new(1);
-        assert!(!writer.is_full());
-        writer.add(make_key("x"), vec![0], BucketMode::Inline);
-        assert!(writer.is_full());
+    fn test_batch_builder_is_full_at_exact_capacity() {
+        let mut builder = BatchBuilder::new(1);
+        assert!(!builder.is_full());
+        builder.add(make_key("x"), vec![0], BucketMode::Inline);
+        assert!(builder.is_full());
     }
 
     // -----------------------------------------------------------------------
