@@ -1,0 +1,37 @@
+# Rust
+target/
+**/*.rs.bk
+*.pdb
+
+# Build artifacts
+*.o
+*.so
+*.a
+*.dylib
+
+# Generated protobuf
+src/control/proto.rs
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python (LMCache connector testing)
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+
+# Benchmark output
+target/criterion/
+
+# Env
+.env
+.env.local

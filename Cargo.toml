@@ -1,0 +1,83 @@
+[workspace]
+members = ["crates/ibverbs-sys", "crates/lmcache-connector"]
+
+[package]
+name = "rdmas"
+version = "0.1.0"
+edition = "2021"
+description = "One-Sided RDMA distributed KV store with LMCache L2 adapter"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = []
+# Enable LMCache L2 connector (pyo3 cdylib, Wave 5)
+pyo3-connector = ["pyo3"]
+
+[dependencies]
+# RDMA FFI bindings (T1-A) — own workspace crate, uses bindgen 0.70
+ibverbs-sys = { path = "crates/ibverbs-sys" }
+
+# Zero-copy struct ↔ bytes (design doc §四.1)
+bytemuck = { version = "1", features = ["derive"] }
+
+# Lock-free channels for async runtime (T1-C)
+crossbeam = "0.8"
+
+# Async runtime: control plane + completion dispatch (T1-C, T3-A)
+tokio = { version = "1", features = ["rt", "sync", "time", "macros", "net"] }
+
+# System FFI: mmap (T1-B), core affinity
+libc = "0.2"
+
+# Error handling
+thiserror = "2"
+
+# Structured logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Random number generation (jitter in retry backoff §四.5)
+rand = "0.8"
+
+# Hash function: XXH64 / XXH128 (design doc §二.2, §五.4)
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
+
+# gRPC control plane (T3-A, Wave 3)
+tonic = "0.12"
+prost = "0.13"
+
+# Python bindings for LMCache connector (Wave 5)
+pyo3 = { version = "0.23", features = ["extension-module"], optional = true }
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[dev-dependencies]
+# Benchmarking (T1-D CAS bench)
+criterion = { version = "0.5", features = ["html_reports"] }
+
+# Concurrency model checking (T2-D)
+loom = "0.7"
+
+# Test utilities
+tempfile = "3"
+rand = "0.8"
+
+[[test]]
+name = "engine_integration"
+path = "tests/engine/integration.rs"
+
+[[bench]]
+name = "engine"
+path = "benches/engine/bench.rs"
+harness = false
+
+[[bench]]
+name = "cas"
+path = "benches/cas/bench.rs"
+harness = false
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3

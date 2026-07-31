@@ -1,0 +1,64 @@
+syntax = "proto3";
+
+package rdmas.control;
+
+// Region type: identifies which memory region on the server.
+enum RegionType {
+    HASH_TABLE = 0;
+    LARGE_OBJECT = 1;
+    FREE_LIST = 2;
+}
+
+// Metadata for a single registered memory region.
+message RegionMetadata {
+    uint64 vaddr = 1;      // virtual address for RDMA access
+    uint32 rkey = 2;       // remote access key
+    uint64 size = 3;       // region size in bytes
+    RegionType type = 4;   // region type
+    uint64 generation = 5; // server generation (restart counter)
+}
+
+// Full server metadata: all regions + generation + table config.
+message ServerMetadata {
+    uint64 generation = 1;
+    repeated RegionMetadata regions = 2;
+    uint64 bucket_count = 3;
+}
+
+// Heartbeat request from client.
+message HeartbeatRequest {
+    uint64 client_id = 1;
+    uint32 active_ts = 2;  // client's latest activity timestamp (GC)
+}
+
+// Heartbeat response from server.
+message HeartbeatResponse {
+    uint64 generation = 1;  // current server generation
+    bool reconnect = 2;     // true if client should re-fetch metadata
+}
+
+// Discovery: client requests server metadata.
+message DiscoverRequest {}
+
+message DiscoverResponse {
+    ServerMetadata metadata = 1;
+}
+
+// Deregister: client notifies server of departure.
+message DeregisterRequest {
+    uint64 client_id = 1;
+}
+
+message DeregisterResponse {}
+
+// Control plane service.
+service ControlPlane {
+    // Client discovers server metadata (MR regions, bucket count).
+    rpc Discover(DiscoverRequest) returns (DiscoverResponse);
+
+    // Heartbeat: client reports liveness and active timestamp for GC.
+    rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+    // Client gracefully leaves.
+    rpc Deregister(DeregisterRequest) returns (DeregisterResponse);
+}
