@@ -29,6 +29,9 @@ tokio = { version = "1", features = ["rt", "sync", "time", "macros", "net"] }
 # System FFI: mmap (T1-B), core affinity
 libc = "0.2"
 
+# Async trait
+async-trait = "0.1"
+
 # Error handling
 thiserror = "2"
 

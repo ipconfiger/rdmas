@@ -44,6 +44,7 @@ pub mod engine;
 pub mod mem;
 pub mod rdma;
 pub mod runtime;
+pub mod transport;
 
 /// Shared error types for the entire crate.
 pub mod error;

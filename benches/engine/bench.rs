@@ -118,6 +118,132 @@ fn bench_extent_alloc(c: &mut Criterion) {
     group.finish();
 }
 
+// ── P0: lock‑free insert (no Mutex) ──
+fn bench_lock_free_insert(c: &mut Criterion) {
+    let mut group = c.benchmark_group("engine_lock_free");
+    group.measurement_time(Duration::from_secs(3));
+    let sizes = [1024u64, 65536];
+
+    for &buckets in &sizes {
+        group.bench_with_input(BenchmarkId::new("insert_lf", buckets), &buckets, |b, &buckets| {
+            b.iter_batched(
+                || CuckooTable::new(buckets, 16),
+                |table| {
+                    let key = bench_key(&format!("lf_{}", rand::random::<u64>()));
+                    let val = 42u64.to_le_bytes();
+                    black_box(table.insert_lock_free(&key, &val, BucketMode::Inline));
+                },
+                criterion::BatchSize::LargeInput,
+            );
+        });
+    }
+    group.finish();
+}
+
+// ── P0: lock‑free concurrent insert (no Arc<Mutex<>>) ──
+fn bench_lock_free_concurrent(c: &mut Criterion) {
+    let mut group = c.benchmark_group("engine_lf_concurrent");
+    group.measurement_time(Duration::from_secs(5));
+
+    for &threads in &[1u64, 4, 8] {
+        group.bench_with_input(BenchmarkId::new("insert_lf_threads", threads), &threads, |b, &threads| {
+            let ops_per_thread = 1000u64;
+            b.iter_batched(
+                || std::sync::Arc::new(CuckooTable::new(1 << 18, 16)),
+                |table| {
+                    let handles: Vec<_> = (0..threads).map(|t| {
+                        let table = table.clone();
+                        std::thread::spawn(move || {
+                            for i in 0..ops_per_thread {
+                                let key = bench_key(&format!("lft{}_k{}", t, i));
+                                let val = (t * ops_per_thread + i).to_le_bytes();
+                                let _ = table.insert_lock_free(&key, &val, BucketMode::Inline);
+                            }
+                        })
+                    }).collect();
+                    for h in handles { h.join().unwrap(); }
+                    black_box(table.buckets().len());
+                },
+                criterion::BatchSize::LargeInput,
+            );
+        });
+    }
+    group.finish();
+}
+
+// ── P2: get_fast inline lookup ──
+fn bench_get_fast(c: &mut Criterion) {
+    let mut group = c.benchmark_group("engine_get_fast");
+    group.measurement_time(Duration::from_secs(3));
+
+    let buckets = 1u64 << 20;
+    let mut table = CuckooTable::new(buckets, 16);
+    let mut keys: Vec<HashedKey> = Vec::new();
+    for i in 0..100_000u64 {
+        let hk = bench_key(&format!("gf_{}", i));
+        table.insert(&hk, &i.to_le_bytes(), BucketMode::Inline).unwrap();
+        keys.push(hk);
+    }
+
+    group.bench_function("get_fast_hit", |b| {
+        b.iter_batched(
+            || &keys,
+            |keys| {
+                let idx = rand::random::<usize>() % keys.len();
+                black_box(table.get_fast(&keys[idx]));
+            },
+            criterion::BatchSize::SmallInput,
+        );
+    });
+
+    group.bench_function("get_fast_missing", |b| {
+        let hk = bench_key("never_inserted");
+        b.iter(|| black_box(table.get_fast(&hk)));
+    });
+    group.finish();
+}
+
+// ── P0: lock‑free lookup ──
+fn bench_lock_free_lookup(c: &mut Criterion) {
+    let mut group = c.benchmark_group("engine_lf_lookup");
+    group.measurement_time(Duration::from_secs(3));
+
+    let buckets = 1u64 << 20;
+    let mut table = CuckooTable::new(buckets, 16);
+    let mut keys: Vec<HashedKey> = Vec::new();
+    for i in 0..100_000u64 {
+        let hk = bench_key(&format!("lfl_{}", i));
+        table.insert(&hk, &i.to_le_bytes(), BucketMode::Inline).unwrap();
+        keys.push(hk);
+    }
+
+    group.bench_function("lookup_lf_hit", |b| {
+        b.iter_batched(
+            || &keys,
+            |keys| {
+                let idx = rand::random::<usize>() % keys.len();
+                black_box(table.lookup_lock_free(&keys[idx]));
+            },
+            criterion::BatchSize::SmallInput,
+        );
+    });
+    group.finish();
+}
+
+// ── P1: CuckooTable::new() isolation ──
+fn bench_table_new(c: &mut Criterion) {
+    let mut group = c.benchmark_group("engine_table_new");
+    group.measurement_time(Duration::from_secs(3));
+
+    let sizes = [1024u64, 65536, 1 << 20];
+    for &buckets in &sizes {
+        group.bench_with_input(BenchmarkId::new("new", buckets), &buckets, |b, &buckets| {
+            b.iter(|| black_box(CuckooTable::new(buckets, 16)));
+        });
+    }
+    group.finish();
+}
+
 fn bench_concurrent_insert(c: &mut Criterion) {
     let mut group = c.benchmark_group("engine_concurrent");
     group.measurement_time(Duration::from_secs(5));
@@ -198,4 +324,7 @@ criterion_group!(lookup, bench_lookup_hit);
 criterion_group!(extent, bench_extent_alloc);
 criterion_group!(concurrent, bench_concurrent_insert);
 criterion_group!(kick, bench_write_kick_chain);
-criterion_main!(insert, lookup, extent, concurrent, kick);
+criterion_group!(lock_free, bench_lock_free_insert, bench_lock_free_concurrent, bench_lock_free_lookup);
+criterion_group!(fast_path, bench_get_fast);
+criterion_group!(table_init, bench_table_new);
+criterion_main!(insert, lookup, extent, concurrent, kick, lock_free, fast_path, table_init);

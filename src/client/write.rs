@@ -23,6 +23,7 @@ use bytemuck::Zeroable;
 use crate::engine::extent::LargeObjectRegion;
 use crate::engine::layout::{BucketMode, HashBucket, HashedKey};
 use crate::error::RdmaError;
+use crate::transport::Transport;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -108,6 +109,156 @@ impl ClientWriter {
             bucket_count,
             h1,
         )
+    }
+
+    /// Distributed CAS-based insert using the transport layer.
+    ///
+    /// Reads bucket metadata remotely, builds a new bucket entry, and uses
+    /// CAS to claim the slot. Falls through to the alternate bucket (h2)
+    /// if the primary (h1) is occupied.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` — the hashed key (must have a non-zero hash).
+    /// * `value` — data to store. Must fit in 32 B for [`BucketMode::Inline`].
+    /// * `mode` — [`BucketMode::Inline`] or [`BucketMode::Extent`].
+    /// * `transport` — the transport layer (RDMA or TCP fallback).
+    /// * `hash_table_vaddr` / `hash_table_rkey` — server's hash table region.
+    /// * `large_obj_vaddr` / `large_obj_rkey` — server's large object region.
+    /// * `bucket_count` — total number of buckets (must be a power of 2).
+    /// * `lkey` — local memory key for the client's registered buffer.
+    ///
+    /// # Note
+    ///
+    /// This is a simplified distributed insert that only attempts direct
+    /// placement (no kick chain). A full implementation would extend this
+    /// with a CAS-based kick chain similar to [`Self::insert`].
+    pub async fn insert_remote(
+        key: &HashedKey,
+        value: &[u8],
+        mode: BucketMode,
+        transport: &dyn Transport,
+        hash_table_vaddr: u64,
+        hash_table_rkey: u32,
+        _large_obj_vaddr: u64,
+        _large_obj_rkey: u32,
+        bucket_count: u64,
+        lkey: u32,
+    ) -> Result<WriteResult, RdmaError> {
+        let h1 = (key.hash % bucket_count) as u64;
+        let h2 = ((key.hash >> 32) % bucket_count | 1) as u64;
+        let bucket_size = 64u64;
+
+        let addr_h1 = hash_table_vaddr + h1 * bucket_size;
+        let addr_h2 = hash_table_vaddr + h2 * bucket_size;
+
+        // Try direct insert at h1.
+        if Self::try_insert_remote_at(
+            key,
+            value,
+            mode,
+            transport,
+            addr_h1,
+            hash_table_rkey,
+            lkey,
+            bucket_size,
+        )
+        .await?
+        {
+            return Ok(WriteResult::Inserted {
+                bucket_idx: h1 as usize,
+            });
+        }
+
+        // Try direct insert at h2.
+        if Self::try_insert_remote_at(
+            key,
+            value,
+            mode,
+            transport,
+            addr_h2,
+            hash_table_rkey,
+            lkey,
+            bucket_size,
+        )
+        .await?
+        {
+            return Ok(WriteResult::Inserted {
+                bucket_idx: h2 as usize,
+            });
+        }
+
+        Ok(WriteResult::TableFull)
+    }
+
+    /// Attempt to insert at a specific remote bucket slot.
+    ///
+    /// Returns `Ok(true)` if the insertion succeeded, `Ok(false)` if the
+    /// bucket is occupied or locked.
+    async fn try_insert_remote_at(
+        key: &HashedKey,
+        value: &[u8],
+        mode: BucketMode,
+        transport: &dyn Transport,
+        remote_addr: u64,
+        remote_rkey: u32,
+        lkey: u32,
+        bucket_size: u64,
+    ) -> Result<bool, RdmaError> {
+        // Read the current bucket contents.
+        let mut bucket_buf = vec![0u8; bucket_size as usize];
+        transport
+            .read(&mut bucket_buf, lkey, remote_addr, remote_rkey)
+            .await?;
+        let bucket = bytemuck::from_bytes::<HashBucket>(&bucket_buf);
+
+        // Locked bucket — another client is writing here.
+        if bucket.is_locked() {
+            return Ok(false);
+        }
+
+        // Empty or tombstone slot is available for writing.
+        if bucket.is_empty() || bucket.is_tombstone() {
+            let mut new_bucket = HashBucket::zeroed();
+            new_bucket.key_hash = key.hash;
+            new_bucket.key_or_digest = key.digest;
+            new_bucket.lock_version = (mode as u64) << 2;
+
+            match mode {
+                BucketMode::Inline => {
+                    let mut inline_val = [0u8; 32];
+                    let len = value.len().min(32);
+                    inline_val[..len].copy_from_slice(&value[..len]);
+                    new_bucket.set_inline_value(&inline_val);
+                }
+                BucketMode::Extent => {
+                    // NOTE: A full distributed implementation would perform
+                    // an extent allocation via a control-plane RPC or a
+                    // remote CAS on the free-list. For now, we reject Extent
+                    // inserts over the transport layer.
+                    return Err(RdmaError::Internal(
+                        "Extent mode not yet supported over transport layer".into(),
+                    ));
+                }
+            }
+
+            // CAS the lock_version to claim the slot.
+            let old_lv = bucket.lock_version;
+            let cas_ok = transport
+                .cas(old_lv, new_bucket.lock_version, lkey, remote_addr, remote_rkey)
+                .await?;
+
+            if cas_ok {
+                // Write the rest of the bucket fields.
+                let packed = bytemuck::bytes_of(&new_bucket);
+                transport
+                    .write(packed, lkey, remote_addr, remote_rkey)
+                    .await?;
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
     }
 
     // -----------------------------------------------------------------------

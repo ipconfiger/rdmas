@@ -577,7 +577,313 @@ RDMAS 有三个结构优势让编排变得简单：
 
 **总计**：3 天可以做一个能用的原型，运行在 RDMAS 集群旁边做自动 P:D 调优。这是当前生态中的空白，Mooncake 也没有提供这个能力。
 
-## 十、结论
+## 十、P:D 编排深度设计
+
+### 10.1 核心编排循环
+
+```
+┌──────────────────────────── Orchestrator Decision Loop ──────────────────────────┐
+│                                                                                   │
+│  every 30s:                                                                       │
+│    stats = gather(director.hit_rate, prefill_queue_depth, decode_queue_depth)     │
+│                                                                                   │
+│    if stats.hit_rate < 0.3 && prefill_queue_depth > 100:                          │
+│      → 缓存太少，prefill 跟不上 → 选 1 个 D 转为 P                                   │
+│    elif stats.hit_rate > 0.8 && decode_queue_depth > 100:                         │
+│      → 缓存充足但 decode 积压 → 选 1 个 P 转为 D                                    │
+│    elif stats.hit_rate < 0.1 && prefill_queue_depth < 10:                         │
+│      → 新模型冷启动，不需要太多 D → 保持当前比例                                       │
+│    else:                                                                           │
+│      → 稳定状态，不变                                                               │
+│                                                                                   │
+└───────────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 决策状态机
+
+```
+                  hit_rate < 0.3         hit_rate > 0.8
+                  prefill 积压            decode 积压
+    ┌─────────┐ ──────────────────┐     ┌──────────────┐
+    │  当前   │                   ▼     │              │
+    │  4P:4D  │              scale_up_P │   4P:4D      │
+    │  稳定   │                   │     │   调整中     │
+    └─────────┘                   │     └──────┬───────┘
+         ▲                        │            │
+         │                        ▼            ▼
+         │                   ┌─────────┐  ┌─────────┐
+         │                   │  5P:3D  │  │  3P:5D  │
+         │                   │  生效   │  │  生效   │
+         │                   └────┬────┘  └────┬────┘
+         │                        │            │
+         └────────────────────────┴────────────┘
+                  hit_rate 恢复到 0.3~0.8 区间
+```
+
+### 10.2 角色切换协议（零数据迁移）
+
+传统 PD 分离中角色切换需要**物理搬动 KV cache 内存**。RDMAS 架构下切换是**纯元数据操作**：
+
+```
+传统 PD 切换:
+  P worker → 序列化 KV cache → TCP/RDMA 发送 → D worker → 反序列化 → 就绪
+  耗时: 秒级（取决于 KV cache 大小），有数据迁移开销
+
+RDMAS Orchestrator 切换:
+  1. Orchestrator: POST /admin/reconfigure { instance_id: "p3", new_role: "DECODE" }
+  2. Director: 更新 InstanceRegistry 中 p3 的角色
+  3. Router: 下次查询时看到 p3 已变为 decode，stop sending prefill requests
+  4. p3: drain 当前 prefill requests → switch → start accepting decode requests
+  5. p3 的 decode 从 RDMAS One-Sided READ 加载 KV cache
+  耗时: < 100ms（只是元数据更新 + drain），零数据迁移
+```
+
+```protobuf
+message ReconfigureRequest {
+    string instance_id = 1;
+    InstanceRole new_role = 2;   // PREFILL → DECODE or DECODE → PREFILL
+    string reason = 3;           // "cache_hit_rate_low" / "decode_queue_overload"
+}
+
+message ReconfigureResponse {
+    bool accepted = 1;
+    string status = 2;           // "draining_prefill" / "active_decode"
+    uint32 estimated_drain_ms = 3; // 预计当前请求排空时间
+}
+```
+
+### 10.3 存储层如何提高 KV 传输效率
+
+#### 问题：传统 PD 的 KV 传输开销
+
+```
+传统 PD 分离 (vLLM + Mooncake Transfer Engine):
+
+  Prefill Worker                     Decode Worker
+  ┌─────────────┐                    ┌─────────────┐
+  │ GPU compute  │                    │ GPU compute  │
+  │ KV cache     │──── RDMA WRITE ──→│ KV cache     │
+  │ (VRAM)      │                    │ (VRAM)       │
+  └─────────────┘                    └─────────────┘
+  
+  问题:
+  - 每对 P-D 之间需要建立 QP 连接
+  - P 需要知道"发给哪个 D"（依赖 Router 决策）
+  - D 需要预留 VRAM 接收 KV cache（内存碎片）
+  - P 崩溃 → KV cache 丢失，D 无法继续
+```
+
+#### RDMAS 方案：存储解耦
+
+```
+  Prefill Worker          RDMAS Node             Decode Worker
+  ┌─────────────┐        ┌──────────────┐        ┌─────────────┐
+  │ GPU compute  │        │ HugePage      │        │ GPU compute  │
+  │             │        │ ┌──────────┐  │        │             │
+  │ 生成 KV ────┼─RDMA ─→│ │ KV blocks│  │←─RDMA ─┼─ 加载 KV    │
+  │             │ WRITE  │ └──────────┘  │ READ   │             │
+  └─────────────┘        └──────────────┘        └─────────────┘
+
+  优势:
+  - P 和 D 完全解耦（P 只管写，D 只管读）
+  - D 不需要预留 VRAM（LRU 淘汰，按需加载）
+  - P 崩溃 → KV cache 仍在 RDMAS → 新 P 可接管
+  - 多个 D 可以同时从同一 RDMAS 节点读取（广播读）
+```
+
+#### 量化对比
+
+| 场景 | 传统 PD | RDMAS + Orchestrator |
+|------|--------|---------------------|
+| **P 崩溃恢复** | 重新 prefill 所有 token（秒级） | KV cache 在 RDMAS 中，新 P 从 checkpoint 继续 |
+| **D 扩容** | 等待 P 传输 KV cache（秒级） | 直接从 RDMAS One-Sided READ（μs 级） |
+| **角色切换** | 物理迁移 KV cache 内存 | 纯元数据更新（< 100ms） |
+| **多 D 读同一 cache** | P 需要复制 N 份（带宽 × N） | 所有 D 从 RDMAS 并发 RDMA READ（带宽共享） |
+| **P:D 比例弹性** | 受内存和带宽限制 | 不受限（RDMAS 节点独立扩展） |
+
+### 10.4 与 Director 的深度集成
+
+```
+                    ┌──────────────────────────────────────┐
+                    │           Orchestrator                │
+                    │  ┌────────────┐  ┌────────────────┐  │
+ Worker  ──register──→│ Instance   │  │  AutoTune      │  │
+ (vLLM)              │  │ Registry   │  │  decision loop │  │
+                    │  └─────┬──────┘  └───────┬────────┘  │
+                    │        │                  │          │
+                    │        │    ┌─────────────┘          │
+                    │        ▼    ▼                        │
+                    │  ┌────────────────────────┐         │
+                    │  │       Director          │         │
+                    │  │  ┌──────────────────┐   │         │
+                    │  │  │   PrefixIndex    │   │         │
+                    │  │  │ block_hash→node   │   │         │
+                    │  │  └────────┬─────────┘   │         │
+                    │  │           │              │         │
+                    │  └───────────┼──────────────┘         │
+                    └──────────────┼────────────────────────┘
+                                   │
+                    ┌──────────────┼────────────────────────┐
+                    │   Connector  │   (内嵌上报)            │
+                    │   ┌──────────▼─────────┐              │
+                    │   │ report_store/remove │              │
+                    │   └────────────────────┘              │
+                    │                                      │
+                    │   One-Sided RDMA READ/WRITE/CAS       │
+                    │                                      │
+                    │  ┌──────┐ ┌──────┐ ┌──────┐         │
+                    │  │Node 0│ │Node 1│ │Node 2│         │
+                    │  └──────┘ └──────┘ └──────┘         │
+                    └──────────────────────────────────────┘
+```
+
+**集成要点**：
+
+1. **Connector 内嵌上报** — `submit_batch_set` 完成即通知 Director 更新索引。无 ZMQ 外部进程，延迟为进程内函数调用。
+
+2. **Orchestrator 读取 Director 统计** — `stats.hit_rate` 来自 Director 的 PrefixIndex 查询统计，不是推理引擎的上报，避免重复采集。
+
+3. **Router 和 Orchestrator 分立** — Router 负责每次请求的实时路由（查 Director），Orchestrator 负责周期性比例调整（查 Director 统计 + 发 reconfigure）。两者不耦合。
+
+4. **存储层感知** — Orchestrator 知道每个 RDMAS 节点的负载（IOPS、带宽利用率），在分配 P 和 D 时考虑节点就近性（P 优先分配在存储节点附近的 GPU，减少跨 NUMA RDMA）。
+
+### 10.5 设计优势总结
+
+| 优势 | 技术原因 | 对比参照 |
+|------|---------|---------|
+| **零数据迁移角色切换** | RDMAS 共享存储，P/D 解耦 | 传统 PD 需搬数据 |
+| **P 崩溃不丢缓存** | KV cache 在 RDMAS，不在 P 内存 | 传统 PD: 缓存随 P 消失 |
+| **D 扩容即开即用** | One-Sided RDMA READ，无需等待数据传输 | 传统 PD: 等待 P→D 拷贝 |
+| **无外部依赖** | 编排逻辑在 Rust 进程内，不依赖 etcd/ZMQ/Go | Mooncake: etcd + ZMQ + Conductor 独立进程 |
+| **内嵌索引更新** | Connector 内存写入，延迟 < 1μs | Mooncake: ZMQ 网络 RTT |
+| **存储感知调度** | Orchestrator 知道各节点负载，就近分配 | 传统: Router 不知道存储拓扑 |
+
+## 十一、扩容机制与进程生命周期
+
+### 11.1 核心原则：我们不拉起进程
+
+RDMAS Orchestrator 的职责边界止于**角色决策**和**缓存感知路由**。进程的启动、停止、健康检查、资源分配——这些交给已有的基础设施（K8s、Docker Compose、Slurm）。
+
+```
+┌─────────────────────────────────────────────────────┐
+│  K8s / Docker / 运维脚本                             │
+│  职责: 进程生命周期（启动/停止/健康检查/资源分配）       │
+│                                                     │
+│  "我有 8 个 vLLM pod，当前 4P:4D"                    │
+│                                                     │
+│  ┌─────────────────────────────────────────────┐    │
+│  │  RDMAS Orchestrator                         │    │
+│  │  职责: 角色决策 + 比例调优                     │    │
+│  │                                             │    │
+│  │  "缓存命中率跌到 0.2，建议 5P:3D"             │    │
+│  │  "pod-3 请从 D 切换为 P"                     │    │
+│  └─────────────────────────────────────────────┘    │
+│                                                     │
+│  ┌─────────────────────────────────────────────┐    │
+│  │  RDMAS Director + Storage                   │    │
+│  │  职责: 缓存索引 + 数据存储 + One-Sided RDMA    │    │
+│  └─────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────┘
+```
+
+### 11.2 为什么不应该由我们管理进程
+
+1. **K8s/Docker 已经解决了进程生命周期**。健康检查、重启策略、资源限制、日志收集都是成熟功能，重做一遍是浪费。
+2. **与基础设施解耦**。不是所有部署都用 K8s——有些用裸机 systemd，有些用 Slurm。绑定一种编排平台会限制适用范围。
+3. **vLLM pod 冷启动需要 10-30 秒**（模型加载 + GPU 预热）。角色切换只需 drain 当前请求（< 100ms）——原地切换比创建/销毁 pod 快 100-300 倍。
+4. **职责单一**。Orchestrator 做 cache 感知决策，K8s 做容器编排。各司其职，互不越界。
+
+### 11.3 三种操作模式
+
+#### 模式 A：纯建议（最低侵入）
+
+Orchestrator 只做分析和建议，不执行任何变更：
+
+```json
+// GET /orchestrator/recommendation
+{
+  "current_pd_ratio": "4:4",
+  "recommended_pd_ratio": "5:3",
+  "reason": "cache_hit_rate dropped to 0.22, prefill queue growing",
+  "suggested_actions": [
+    {"instance": "vllm-d-3", "action": "switch_to_prefill"},
+    {"instance": "vllm-d-2", "action": "keep_decode"}
+  ]
+}
+```
+
+运维人员或 CI 脚本根据建议手动执行。适合初次部署验证阶段。
+
+#### 模式 B：自动角色切换（推荐）
+
+Orchestrator 直接通过 vLLM HTTP API 切换已有 worker 的角色，**不创建/销毁进程**：
+
+```bash
+# Orchestrator 内部执行（不是运维人员手动执行）：
+POST http://vllm-d-3:8000/admin/reconfigure
+{
+  "role": "prefill",
+  "reason": "orchestrator_auto_tune"
+}
+# vllm-d-3 原地从 decode 切换为 prefill
+# 进程不重启，容器不重建
+# 切换时间: drain 当前请求（< 100ms）
+```
+
+前提：vLLM/SGLang 暴露角色切换 API。如果不暴露，可以通过重启进程 + 改命令行参数的方式模拟（由 K8s 执行滚动更新，Orchestrator 只发指令）。
+
+#### 模式 C：全自动（K8s 集成，可选）
+
+Orchestrator 通过 K8s API 调整 Deployment 副本数。**作为可选功能，不建议作为默认模式**：
+
+```rust
+// 仅在启用 k8s feature 时可用
+k8s_client.patch_deployment("vllm-prefill", |spec| {
+    spec.replicas += 1;  // 新增一个 prefill pod
+});
+k8s_client.patch_deployment("vllm-decode", |spec| {
+    spec.replicas -= 1;  // 减少一个 decode pod
+});
+```
+
+需要 K8s RBAC 权限，与特定基础设施耦合。作为 feature flag 提供。
+
+### 11.4 操作模式对比
+
+| | 模式 A | 模式 B | 模式 C |
+|--|--------|--------|--------|
+| **实现复杂度** | 最低 | 中 | 高 |
+| **基础设施依赖** | 无 | vLLM HTTP API | K8s API + RBAC |
+| **响应速度** | 人工延迟 | < 100ms | pod 重建 ~10-30s |
+| **风险** | 无 | vLLM API 兼容性 | K8s 权限 + pod 冷启动 |
+| **推荐阶段** | 首次部署验证 | 生产环境 | 深度 K8s 集成场景 |
+
+### 11.5 部署拓扑
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                    K8s / Docker Compose                    │
+│  ┌──────────────────────────────────────────────────────┐ │
+│  │  Deployment: vllm-worker  (replicas: 8)              │ │
+│  │  ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐   │ │
+│  │  │ P0  │ │ P1  │ │ P2  │ │ P3  │ │ D0  │ │ D1  │ … │ │
+│  │  └──┬──┘ └──┬──┘ └──┬──┘ └──┬──┘ └──┬──┘ └──┬──┘   │ │
+│  │     │ RDMA  │       │       │ RDMA  │       │       │ │
+│  └─────┼───────┼───────┼───────┼───────┼───────┼───────┘ │
+│        │       │       │       │       │       │         │
+│  ┌─────┴───────┴───────┴───────┴───────┴───────┴───────┐ │
+│  │                  RDMAS Storage                       │ │
+│  │              Node 0      Node 1        ...           │ │
+│  └──────────────────────────────────────────────────────┘ │
+│                                                           │
+│  ┌──────────────────────────────────────────────────────┐ │
+│  │  Orchestrator (模式 B: 自动切换)                      │ │
+│  │  POST /admin/reconfigure → vllm-d-3 切换为 P          │ │
+│  └──────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────┘
+```
+
+## 十二、结论
 
 在 RDMAS 之上构建 Director 协调层，可以让 PD 分离推理系统获得：
 

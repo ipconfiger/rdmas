@@ -31,6 +31,7 @@
 use crate::engine::extent::LargeObjectRegion;
 use crate::engine::layout::{BucketMode, HashBucket, HashedKey};
 use crate::error::RdmaError;
+use crate::transport::Transport;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -118,6 +119,130 @@ impl ClientReader {
         }
 
         Ok(None)
+    }
+
+    /// Distributed read: use the transport layer to read from remote memory.
+    ///
+    /// The `hash_table_vaddr` and `large_obj_vaddr` are the byte addresses
+    /// of the server's registered memory regions. The bucket size is fixed
+    /// at 64 bytes (matching [`HashBucket`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `key` — the hashed key to look up.
+    /// * `transport` — the transport layer (RDMA or TCP fallback).
+    /// * `hash_table_vaddr` / `hash_table_rkey` — server's hash table region.
+    /// * `large_obj_vaddr` / `large_obj_rkey` — server's large object region.
+    /// * `bucket_count` — total number of buckets (must be a power of 2).
+    /// * `lkey` — local memory key for the client's registered buffer.
+    pub async fn get_remote(
+        key: &HashedKey,
+        transport: &dyn Transport,
+        hash_table_vaddr: u64,
+        hash_table_rkey: u32,
+        large_obj_vaddr: u64,
+        large_obj_rkey: u32,
+        bucket_count: u64,
+        lkey: u32,
+    ) -> Result<Option<ReadResult>, RdmaError> {
+        // Sanity checks (same as local `get`).
+        if key.hash == 0 {
+            return Err(RdmaError::InvalidKey);
+        }
+        if !bucket_count.is_power_of_two() {
+            return Err(RdmaError::Internal(format!(
+                "bucket_count must be a power of 2, got {bucket_count}"
+            )));
+        }
+
+        // Hash to get bucket indices.
+        let h1 = (key.hash % bucket_count) as u64;
+        let h2 = ((key.hash >> 32) % bucket_count | 1) as u64;
+
+        let bucket_size = 64u64;
+
+        // Read bucket at h1 (64 bytes).
+        let mut bucket_buf = vec![0u8; bucket_size as usize];
+        transport
+            .read(
+                &mut bucket_buf,
+                lkey,
+                hash_table_vaddr + h1 * bucket_size,
+                hash_table_rkey,
+            )
+            .await?;
+        let bucket = bytemuck::from_bytes::<HashBucket>(&bucket_buf);
+
+        if !bucket.is_locked() && bucket.matches_key(key.hash, &key.digest) {
+            return Ok(Some(
+                Self::extract_value(
+                    bucket,
+                    transport,
+                    large_obj_vaddr,
+                    large_obj_rkey,
+                    lkey,
+                )
+                .await?,
+            ));
+        }
+
+        // Probe h2.
+        transport
+            .read(
+                &mut bucket_buf,
+                lkey,
+                hash_table_vaddr + h2 * bucket_size,
+                hash_table_rkey,
+            )
+            .await?;
+        let bucket = bytemuck::from_bytes::<HashBucket>(&bucket_buf);
+
+        if !bucket.is_locked() && bucket.matches_key(key.hash, &key.digest) {
+            return Ok(Some(
+                Self::extract_value(
+                    bucket,
+                    transport,
+                    large_obj_vaddr,
+                    large_obj_rkey,
+                    lkey,
+                )
+                .await?,
+            ));
+        }
+
+        Ok(None)
+    }
+
+    /// Extract the value from a matched bucket, reading from the large-object
+    /// region if the bucket is in Extent mode.
+    async fn extract_value(
+        bucket: &HashBucket,
+        transport: &dyn Transport,
+        large_obj_vaddr: u64,
+        large_obj_rkey: u32,
+        lkey: u32,
+    ) -> Result<ReadResult, RdmaError> {
+        if bucket.is_inline() {
+            Ok(ReadResult {
+                value: bucket.inline_value().to_vec(),
+                mode: BucketMode::Inline,
+            })
+        } else {
+            let (offset, length) = bucket.extent_ref();
+            let mut buf = vec![0u8; length as usize];
+            transport
+                .read(
+                    &mut buf,
+                    lkey,
+                    large_obj_vaddr + offset,
+                    large_obj_rkey,
+                )
+                .await?;
+            Ok(ReadResult {
+                value: buf,
+                mode: BucketMode::Extent,
+            })
+        }
     }
 
     // -----------------------------------------------------------------------

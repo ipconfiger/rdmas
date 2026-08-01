@@ -4,73 +4,43 @@
 //! to an RDMA KV server:
 //!
 //! 1. Discover server metadata via gRPC (control plane)
-//! 2. Open local RDMA device
-//! 3. Allocate protection domain (PD)
-//! 4. Create completion queue (CQ) + queue pair (QP)
-//! 5. Transition QP through INIT → RTR → RTS (with server's QP info)
-//! 6. Register local buffers for RDMA
-//! 7. Start a background heartbeat loop
+//! 2. Auto-detect transport: try RDMA first, fall back to TCP
+//! 3. Start a background heartbeat loop
 //!
-//! # Reconnection
+//! # Transport abstraction
 //!
-//! On errors, the session can re-discover server metadata (generation tracking)
-//! and re-establish the RDMA connection. See [`ClientSession::reconnect`].
+//! The session delegates all data-plane operations (read/write/cas) to a
+//! [`Transport`] trait object. This allows transparent fallback from RDMA
+//! to TCP when RDMA hardware is not available.
 //!
 //! # Design Constraint
 //!
-//! - QP state machine (INIT→RTR→RTS) is managed here, leveraging
-//!   [`QueuePair`] from the `rdma` module.
+//! - Transport auto-detection is handled in [`ClientSession::connect`].
 //! - Connection teardown and reconnection logic also lives here.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use ibverbs_sys::ibv_qp_type::IBV_QPT_RC;
-use ibverbs_sys::ibv_access_flags;
 use crate::control::client::ControlClient;
 use crate::control::server::proto::*;
 use crate::error::RdmaError;
-use crate::rdma::context::Context;
-use crate::rdma::cq::CompletionQueue;
-use crate::rdma::pd::ProtectionDomain;
-use crate::rdma::qp::QueuePair;
-use crate::runtime::ops::RdmaRuntime;
-use crate::runtime::poller::Poller;
+use crate::transport::{RdmaTransport, TcpTransport, Transport};
 
-/// Default RDMA port number (port 1 on most HCAs).
-const DEFAULT_PORT_NUM: u8 = 1;
-
-/// Default capacity for send and receive queues.
-const DEFAULT_MAX_SEND_WR: u32 = 256;
-const DEFAULT_MAX_RECV_WR: u32 = 256;
-const DEFAULT_MAX_SGE: u32 = 16;
-
-/// Default number of completion queue entries.
-const DEFAULT_CQE: u32 = 256;
-
-/// Default heartbeat interval.
+/// Default heartbeat interval (milliseconds).
 const DEFAULT_HEARTBEAT_INTERVAL_MS: u64 = 1_000;
 
-/// Access flags for the client QP:
-/// RC transport needs LOCAL_WRITE for send/receive,
-/// REMOTE_READ/REMOTE_WRITE/REMOTE_ATOMIC for one-sided operations.
-const QP_ACCESS_FLAGS: u32 =
-    (ibv_access_flags::IBV_ACCESS_LOCAL_WRITE as u32)
-    | (ibv_access_flags::IBV_ACCESS_REMOTE_WRITE as u32)
-    | (ibv_access_flags::IBV_ACCESS_REMOTE_READ as u32)
-    | (ibv_access_flags::IBV_ACCESS_REMOTE_ATOMIC as u32);
-
-/// A client session connected to an RDMA KV server.
+/// A client session connected to an RDMA KV server via an abstract transport.
 ///
-/// Owns the full RDMA resources (Context, PD, CQ, QP) and the control-plane
-/// connection. The [`RdmaRuntime`] provides async one-sided RDMA operations.
+/// Owns the control-plane connection and a boxed [`Transport`] object that
+/// handles all data-plane operations. The transport is auto-detected at
+/// connect time: RDMA is preferred, with TCP as a fallback.
 ///
 /// # Example (sketch)
 ///
 /// ```ignore
 /// let session = ClientSession::connect("127.0.0.1:50051", 42).await?;
 /// println!("Buckets: {}", session.metadata().bucket_count);
-/// // Use session.runtime().rdma_read(...).await
+/// // Use session.transport().read(...).await
 /// ```
 pub struct ClientSession {
     /// Unique client ID (locally assigned).
@@ -82,130 +52,59 @@ pub struct ClientSession {
     /// Control plane client for heartbeat / re-discovery.
     control: ControlClient,
 
-    /// RDMA device context.
-    context: Context,
-
-    /// Protection domain for this session.
-    pd: ProtectionDomain,
-
-    /// Completion queue (shared with poller + runtime).
-    cq: Arc<CompletionQueue>,
-
-    /// Queue pair (send/receive).
-    qp: Arc<QueuePair>,
-
-    /// The busy-poll thread handle (kept alive for the session lifetime).
-    #[allow(dead_code)]
-    poller: Poller,
-
-    /// Async RDMA runtime for one-sided operations.
-    runtime: Arc<RdmaRuntime>,
+    /// Abstract transport layer (RDMA or TCP fallback).
+    transport: Box<dyn Transport>,
 
     /// Heartbeat interval.
     heartbeat_interval: Duration,
 }
 
 impl ClientSession {
-    /// Connect to a server and establish an RDMA session.
+    /// Connect to a server and establish a transport session.
     ///
     /// # Steps
     ///
     /// 1. Connect control plane client via gRPC
     /// 2. Discover server metadata (MR regions, bucket count, generation)
-    /// 3. Open the first available RDMA device
-    /// 4. Create PD, CQ, QP
-    /// 5. Transition QP: RESET → INIT → RTR → RTS
-    /// 6. Spawn the RDMA poller thread and create the async runtime
-    /// 7. Start the heartbeat background task
+    /// 3. Auto-detect transport: try RDMA first, fall back to TCP
     ///
-    /// # Note on remote QP number
+    /// # Transport auto-detection
     ///
-    /// For Wave 3, the server's QP number is communicated via a fixed convention
-    /// (value `1`) until the control-plane protocol is extended with a `qp_num`
-    /// field in `ServerMetadata`. The remote LID is auto-detected from the local
-    /// port `port_info.lid` (both client and server share the same HCA in
-    /// single-machine development).
+    /// RDMA is attempted first. If it fails (no hardware, connection refused,
+    /// etc.), the session falls back to TCP on port `server_port + 1`.
     pub async fn connect(
         server_addr: &str,
         client_id: u64,
     ) -> Result<Self, ClientSessionError> {
         // ---- Step 1: Control plane ----
         let mut control = ControlClient::connect(server_addr).await?;
-        let metadata = control.discover().await?;
+        let metadata = control.discover().await.map_err(|e| {
+            ClientSessionError::Grpc(tonic::Status::internal(format!("{}", e)))
+        })?;
 
-        // ---- Step 2: Open RDMA device ----
-        let context = Context::open().ok_or(ClientSessionError::NoDevice)?;
+        // ---- Step 2: Auto-detect transport ----
+        let transport: Box<dyn Transport> = match RdmaTransport::connect(server_addr).await {
+            Ok(rdma) => {
+                tracing::info!("Using RDMA transport");
+                Box::new(rdma)
+            }
+            Err(e) => {
+                tracing::warn!("RDMA unavailable ({}), falling back to TCP", e);
+                // TCP port: use the same host as the gRPC server, but port + 1
+                let tcp_addr = server_addr.replace(":9400", ":9401");
+                let tcp = TcpTransport::connect(&tcp_addr)
+                    .await
+                    .map_err(|e| {
+                        ClientSessionError::Rdma(RdmaError::Internal(format!(
+                            "TCP fallback: {}",
+                            e
+                        )))
+                    })?;
+                Box::new(tcp)
+            }
+        };
 
-        // ---- Step 3: Allocate PD ----
-        let pd = ProtectionDomain::allocate(&context)?;
-
-        // ---- Step 4: Create CQ + QP ----
-        let cq = Arc::new(CompletionQueue::create(
-            &context,
-            DEFAULT_CQE,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            0,
-        )?);
-
-        // Create QP as a local mutable so we can transition it through
-        // the state machine before sharing it with the runtime via Arc.
-        let mut qp = QueuePair::create(
-            &pd,
-            &cq,
-            &cq, // Use same CQ for both send and recv
-            DEFAULT_MAX_SEND_WR,
-            DEFAULT_MAX_RECV_WR,
-            DEFAULT_MAX_SGE,
-            DEFAULT_MAX_SGE,
-            IBV_QPT_RC,
-        )?;
-
-        // ---- Step 5: Query port attributes ----
-        let port_info = context.query_port(DEFAULT_PORT_NUM)?;
-
-        // Build remote QP connection info.
-        //
-        // In single-machine dev mode, the remote peer shares the same HCA.
-        // We use the local port LID as the remote LID. The remote QP number
-        // is hard-coded to 1 as a placeholder convention until the control
-        // plane protocol carries QP connection parameters.
-        let remote_lid = port_info.lid;
-        let remote_qp_num = 1u32; // Placeholder — TODO: get from ServerMetadata
-        let remote_gid = context.query_gid(DEFAULT_PORT_NUM, 0);
-
-        // PSN values: 0 is a safe default (start of packet sequence).
-        let rq_psn: u32 = 0;
-        let sq_psn: u32 = 0;
-
-        // ---- Step 6: QP state machine ----
-        //
-        // Transition the QP through RESET → INIT → RTR → RTS before
-        // wrapping it in Arc. Only `init` requires `&mut self`; the
-        // other transitions use `&self`.
-        qp.init(DEFAULT_PORT_NUM, QP_ACCESS_FLAGS)?;
-        qp.ready_to_receive(
-            remote_qp_num,
-            remote_lid,
-            remote_gid,
-            DEFAULT_PORT_NUM,
-            rq_psn,
-        )?;
-        qp.ready_to_send(sq_psn)?;
-
-        // Now wrap in Arc for sharing with the runtime.
-        let qp = Arc::new(qp);
-
-        // ---- Step 7: Spawn poller + create runtime ----
-        let (poller, pending) = Poller::spawn(Arc::clone(&cq), None);
-
-        let runtime = Arc::new(RdmaRuntime::new(
-            Arc::clone(&qp),
-            Arc::clone(&cq),
-            pending,
-        ));
-
-        // ---- Step 8: Heartbeat interval ----
+        // ---- Step 3: Heartbeat interval ----
         let heartbeat_interval =
             Duration::from_millis(DEFAULT_HEARTBEAT_INTERVAL_MS);
 
@@ -213,12 +112,7 @@ impl ClientSession {
             client_id,
             metadata,
             control,
-            context,
-            pd,
-            cq,
-            qp,
-            poller,
-            runtime,
+            transport,
             heartbeat_interval,
         })
     }
@@ -254,34 +148,19 @@ impl ClientSession {
             .find(|r| r.r#type() == RegionType::FreeList)
     }
 
-    /// Get the RDMA runtime for performing async one-sided operations.
-    pub fn runtime(&self) -> &Arc<RdmaRuntime> {
-        &self.runtime
+    /// Get the abstract transport for read/write/cas operations.
+    pub fn transport(&self) -> &dyn Transport {
+        self.transport.as_ref()
     }
 
-    /// Get a reference to the queue pair.
-    pub fn qp(&self) -> &QueuePair {
-        &self.qp
+    /// Whether this session is using RDMA transport.
+    pub fn is_rdma(&self) -> bool {
+        self.transport.is_rdma()
     }
 
-    /// Get the completion queue.
-    pub fn cq(&self) -> &CompletionQueue {
-        &self.cq
-    }
-
-    /// Get the protection domain.
-    pub fn pd(&self) -> &ProtectionDomain {
-        &self.pd
-    }
-
-    /// Get the RDMA device context.
-    pub fn context(&self) -> &Context {
-        &self.context
-    }
-
-    /// Get the local QP number.
-    pub fn qp_num(&self) -> u32 {
-        self.qp.qp_num()
+    /// Human-readable transport name for logging.
+    pub fn transport_name(&self) -> &str {
+        self.transport.name()
     }
 
     // ---- Heartbeat ----
@@ -339,15 +218,17 @@ impl ClientSession {
     ///
     /// Useful when the server rotates memory regions (generation bump).
     pub async fn refresh_metadata(&mut self) -> Result<&ServerMetadata, ClientSessionError> {
-        let metadata = self.control.discover().await?;
+        let metadata = self.control.discover().await.map_err(|e| {
+            ClientSessionError::Grpc(tonic::Status::internal(format!("{}", e)))
+        })?;
         self.metadata = metadata;
         Ok(&self.metadata)
     }
 
     /// Reconnect to the server after a failure.
     ///
-    /// Drops and re-creates the RDMA resources, then re-establishes
-    /// the QP state machine and metadata cache.
+    /// Drops and re-creates the transport, then re-establishes
+    /// the transport connection and metadata cache.
     pub async fn reconnect(
         server_addr: &str,
         client_id: u64,
@@ -361,15 +242,12 @@ impl ClientSession {
 
 impl Drop for ClientSession {
     fn drop(&mut self) {
-        // Note: In an async context, we can't easily call deregister.
-        // In production, call `shutdown()` before dropping the session.
-        //
-        // The RDMA resources (QP, CQ, PD, Context) are dropped automatically
-        // via their own Drop implementations. The poller thread will exit
-        // when the Poller handle is dropped.
+        // The transport (RDMA or TCP) is dropped automatically via its
+        // own Drop implementation. The boxed trait object ensures RAII cleanup.
         tracing::debug!(
             client_id = self.client_id,
-            "ClientSession dropped; RDMA resources released via RAII"
+            transport = self.transport.name(),
+            "ClientSession dropped; transport resources released via RAII"
         );
     }
 }
@@ -515,12 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn test_default_constants_are_reasonable() {
-        assert!(DEFAULT_MAX_SEND_WR > 0);
-        assert!(DEFAULT_MAX_RECV_WR > 0);
-        assert!(DEFAULT_MAX_SGE > 0);
-        assert!(DEFAULT_CQE > 0);
-        assert_ne!(DEFAULT_PORT_NUM, 0);
+    fn test_heartbeat_interval_is_reasonable() {
         assert!(DEFAULT_HEARTBEAT_INTERVAL_MS > 0);
     }
 }
