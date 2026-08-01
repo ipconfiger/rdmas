@@ -70,6 +70,10 @@ rand = "0.8"
 name = "engine_integration"
 path = "tests/engine/integration.rs"
 
+[[test]]
+name = "tcp_integration"
+path = "tests/transport/tcp_integration.rs"
+
 [[bench]]
 name = "engine"
 path = "benches/engine/bench.rs"
@@ -78,6 +82,11 @@ harness = false
 [[bench]]
 name = "cas"
 path = "benches/cas/bench.rs"
+harness = false
+
+[[bench]]
+name = "tcp"
+path = "benches/engine/tcp_bench.rs"
 harness = false
 
 [profile.release]
