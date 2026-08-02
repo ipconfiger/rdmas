@@ -202,6 +202,7 @@ rdmas/
 | 文档 | 说明 |
 |------|------|
 | [设计方案 v3](docs/Rust-RDMA.md) | 534 行完整技术设计，经 Oracle 交叉审计 |
+| [生产部署指南](docs/deployment.md) | 生产环境部署：硬件、HugePages、PFC/ECN、Docker、故障排查 |
 | [开发执行计划](docs/开发执行计划.md) | 6 波次轨道 + Gate 门禁，242 行 |
 | [Wave 7 硬件实测](docs/Wave7-硬件实测计划.md) | RDMA 实机验证 3 Phase 7 天计划 |
 | [进度报告](docs/进度报告.md) | 当前完成状态 + 性能基准数据 |

@@ -26,8 +26,33 @@ pub trait Transport: Send + Sync {
     fn name(&self) -> &'static str;
 }
 
+/// Transport that supports reconnection after failure.
+///
+/// When the underlying connection enters a failure state (e.g., QP ERROR
+/// for RDMA, or TCP disconnect), the caller can invoke `reconnect()` to
+/// obtain a fresh transport instance without restarting the application.
+///
+/// # Usage with QpGuard
+///
+/// [`QpGuard`](crate::rdma::QpGuard) detects QP ERROR state on each
+/// operation. When it returns an error, the retry layer (e.g.,
+/// [`retry_rdma_op`](crate::client::retry::retry_rdma_op)) catches it
+/// and the caller invokes `reconnect()` to create a new transport.
+#[async_trait]
+pub trait ReconnectableTransport: Transport {
+    /// Attempt to reconnect after a connection failure.
+    ///
+    /// Returns a fresh transport instance or an error. The old transport
+    /// instance should be discarded after a successful reconnect.
+    async fn reconnect(&self, server_addr: &str) -> Result<Box<dyn Transport>, RdmaError>;
+}
+
+pub mod gdr;
 pub mod rdma;
 pub mod tcp;
 
 pub use rdma::RdmaTransport;
 pub use tcp::TcpTransport;
+
+#[cfg(feature = "gdr")]
+pub use gdr::GdrTransport;

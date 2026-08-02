@@ -1,0 +1,48 @@
+# RDMAS Multi-Node Test Setup (SoftRoCE / RDMA)
+#
+# Prerequisites on host:
+#   1. Load SoftRoCE kernel module:  sudo modprobe rdma_rxe
+#   2. Create SoftRoCE device:       sudo rdma link add rxe0 type rxe netdev eth0
+#   3. Verify:                       rdma link show
+#   4. Allocate HugePages:           echo 4096 | sudo tee /proc/sys/vm/nr_hugepages
+#
+# Override RDMA_DEVICE_NAME via .env or inline if your device name differs.
+
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rdmas:latest
+    container_name: rdmas-server
+    privileged: true
+    network_mode: host
+    devices:
+      - /dev/infiniband/uverbs0
+      - /dev/infiniband/rdma_cm
+    volumes:
+      - /dev/hugepages:/dev/hugepages
+    environment:
+      - RDMA_DEVICE_NAME=${RDMA_DEVICE_NAME:-rxe0}
+      - RUST_LOG=${RUST_LOG:-info}
+    command: ["cargo", "run", "--release", "--", "server", "--addr", "0.0.0.0:9100"]
+
+  client:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rdmas:latest
+    container_name: rdmas-client
+    privileged: true
+    network_mode: host
+    devices:
+      - /dev/infiniband/uverbs0
+      - /dev/infiniband/rdma_cm
+    volumes:
+      - /dev/hugepages:/dev/hugepages
+    environment:
+      - RDMA_DEVICE_NAME=${RDMA_DEVICE_NAME:-rxe0}
+      - RUST_LOG=${RUST_LOG:-info}
+    depends_on:
+      - server
+    command: ["cargo", "run", "--release", "--", "benchmark", "--server", "localhost:9100"]

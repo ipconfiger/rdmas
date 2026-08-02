@@ -11,6 +11,16 @@ use crate::error::RdmaError;
 /// The LMCache connector (Wave 5) codes against this trait.
 /// Implementation details in `engine` and `client` modules may change,
 /// but this contract must be preserved across waves.
+///
+/// # Multi-Tenant Usage
+///
+/// To isolate keys between tenants, hash keys through `TenantNamespace`:
+/// ```
+/// use rdmas::control::tenant::TenantNamespace;
+/// let tenant = TenantNamespace::new(42);
+/// let hashed_key = tenant.hashed_key(b"my_key");
+/// // Use hashed_key with standard KvEngine operations
+/// ```
 pub trait KvEngine: Send + Sync {
     /// Read a single key. Returns `None` if the key does not exist.
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, RdmaError>;
@@ -29,4 +39,15 @@ pub trait KvEngine: Send + Sync {
 
     /// Batch write multiple key-value pairs.
     fn batch_put(&self, kvs: &[(&[u8], &[u8])]) -> Vec<Result<(), RdmaError>>;
+
+    /// Evict up to `n` least-recently-used entries.
+    /// Returns the number of entries actually evicted.
+    fn evict(&self, _n: usize) -> Result<usize, RdmaError> {
+        Ok(0) // default: no-op for engines without LRU
+    }
+
+    /// Get current estimated key count for the engine.
+    fn key_count(&self) -> u64 {
+        0 // default
+    }
 }

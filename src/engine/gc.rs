@@ -6,10 +6,11 @@
 //! Runs sweep cycles that reclaim extents whose `epoch_mark`
 //! has fallen below the minimum active timestamp across all clients.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::engine::concurrency;
 use crate::engine::extent::LargeObjectRegion;
+use crate::engine::lru::LruTracker;
 
 /// Epoch-based Garbage Collector for the Large Object Region.
 ///
@@ -23,6 +24,8 @@ pub struct EpochGc {
     sweep_interval_ms: u64,
     /// Last sweep timestamp
     last_sweep: Mutex<u64>,
+    /// Optional LRU tracker for cache eviction (T10-A).
+    lru: Option<Arc<LruTracker>>,
 }
 
 impl EpochGc {
@@ -32,6 +35,17 @@ impl EpochGc {
             pending: Mutex::new(Vec::new()),
             sweep_interval_ms,
             last_sweep: Mutex::new(concurrency::now_ms() as u64),
+            lru: None,
+        }
+    }
+
+    /// Create an epoch GC with an LRU tracker for cache eviction (T10-A).
+    pub fn with_lru(sweep_interval_ms: u64, lru_tracker: Arc<LruTracker>) -> Self {
+        Self {
+            pending: Mutex::new(Vec::new()),
+            sweep_interval_ms,
+            last_sweep: Mutex::new(concurrency::now_ms() as u64),
+            lru: Some(lru_tracker),
         }
     }
 
@@ -56,9 +70,26 @@ impl EpochGc {
         let mut last = self.last_sweep.lock().unwrap();
 
         if now - *last < self.sweep_interval_ms {
+            // Even if sweep interval hasn't elapsed, check LRU watermark
+            // and evict if needed (T10-A).
+            if let Some(lru) = &self.lru {
+                if lru.needs_eviction() {
+                    // Evict 10% of watermark size or at least 1 entry.
+                    let n = (lru.key_count().saturating_sub(lru.key_count().min(1)) / 10).max(1) as usize;
+                    return self.evict_lru(region, n);
+                }
+            }
             return 0;
         }
         *last = now;
+
+        // Also trigger LRU eviction during sweep if watermark exceeded.
+        if let Some(lru) = &self.lru {
+            if lru.needs_eviction() {
+                let n = (lru.key_count() / 10).max(1) as usize;
+                self.evict_lru(region, n);
+            }
+        }
 
         self.sweep(region, min_active_ts)
     }
@@ -97,6 +128,46 @@ impl EpochGc {
         let now = concurrency::now_ms() as u64;
         let last = *self.last_sweep.lock().unwrap();
         now - last >= self.sweep_interval_ms
+    }
+
+    /// Evict up to `n` least-recently-used entries from the extent region.
+    ///
+    /// Returns the number of entries actually evicted.  Uses the LRU tracker
+    /// (if configured) to select candidates, then marks them for GC sweep.
+    ///
+    /// If no LRU tracker is configured, returns 0.
+    pub fn evict_lru(&self, region: &mut LargeObjectRegion, n: usize) -> usize {
+        let lru = match &self.lru {
+            Some(l) => l,
+            None => return 0,
+        };
+
+        let candidates = lru.select_eviction_candidates(n);
+        if candidates.is_empty() {
+            return 0;
+        }
+
+        let evicted_count = candidates.len();
+        for key_hash in &candidates {
+            // Schedule each candidate for deletion.
+            // In production this would translate key_hash -> extent offset
+            // via the cuckoo table lookup; for now we use the key_hash
+            // directly as a simplified deletion marker.
+            self.schedule_deletion(*key_hash);
+        }
+
+        // Immediately sweep to reclaim space.
+        let min_ts = concurrency::now_ms() as u32;
+        self.sweep(region, min_ts);
+
+        lru.increment_evicted(evicted_count as u64);
+        tracing::info!(evicted = evicted_count, "LRU eviction completed");
+        evicted_count
+    }
+
+    /// Get a reference to the LRU tracker, if configured.
+    pub fn lru_tracker(&self) -> Option<&Arc<LruTracker>> {
+        self.lru.as_ref()
     }
 }
 

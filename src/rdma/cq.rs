@@ -3,6 +3,20 @@
 //! Completion Queues (CQs) collect work completion events from
 //! posted send and receive work requests. The poller polls CQs
 //! to harvest completed operations.
+//!
+//! ## Event-Driven Polling (Client-Side)
+//!
+//! [`CqEventChannel`] provides an `fd` that can be monitored via `epoll`
+//! for event-driven completion harvesting. Usage:
+//!
+//! 1. Create a [`CqEventChannel`] from the device [`Context`].
+//! 2. Create a [`CompletionQueue`] that references this channel.
+//! 3. Call [`CompletionQueue::request_notification`] to arm the next event.
+//! 4. `epoll` on [`CqEventChannel::fd`] — when readable, call
+//!    [`CqEventChannel::get_event`] then [`CqEventChannel::ack_events`].
+//! 5. Poll the CQ for actual completions.
+//!
+//! See [`super::runtime::poller::AsyncPoller`] for an implementation.
 
 use std::os::raw::c_void;
 
@@ -119,6 +133,15 @@ impl CompletionQueue {
         Ok(())
     }
 
+    /// Convenience wrapper around [`poll`] for a single completion.
+    ///
+    /// Returns `None` when no completions are available (not an error).
+    /// Returns `Ok(Some(wc))` when a single completion was harvested.
+    pub fn poll_single(&self) -> Result<Option<WorkCompletion>, RdmaError> {
+        let wcs = self.poll(1)?;
+        Ok(wcs.into_iter().next())
+    }
+
     /// Get the raw `ibv_cq` pointer for use in FFI calls.
     pub fn as_ptr(&self) -> *mut ibv_cq {
         self.inner
@@ -170,3 +193,112 @@ impl WorkCompletion {
         self.status == ibv_wc_status::IBV_WC_SUCCESS
     }
 }
+
+// ---------------------------------------------------------------------------
+// CqEventChannel — Event-driven completion notification (client-side only)
+// ---------------------------------------------------------------------------
+
+/// Completion event channel for event-driven CQ polling.
+///
+/// Wraps `ibv_comp_channel` which provides a file descriptor suitable
+/// for `epoll` integration. When the fd becomes readable, call
+/// [`get_event`](CqEventChannel::get_event) to retrieve the CQ that
+/// has completions, then [`ack_events`](CqEventChannel::ack_events) to
+/// re-arm.
+///
+/// # Client-Side Only
+///
+/// Completion channels are used only on the **client** side. Server-side
+/// one-sided RDMA operations (READ/WRITE/CAS) do not generate CQ events
+/// on the server.
+pub struct CqEventChannel {
+    inner: *mut ibv_comp_channel,
+}
+
+impl CqEventChannel {
+    /// Create a new completion event channel for the given device context.
+    ///
+    /// Returns an error if `ibv_create_comp_channel` returns NULL.
+    pub fn create(ctx: &Context) -> Result<Self, RdmaError> {
+        let channel = unsafe { ibv_create_comp_channel(ctx.as_ptr()) };
+
+        if channel.is_null() {
+            return Err(RdmaError::HardwareError(
+                "ibv_create_comp_channel returned NULL".to_string(),
+            ));
+        }
+
+        Ok(CqEventChannel { inner: channel })
+    }
+
+    /// Return the file descriptor suitable for `epoll` / `select`.
+    ///
+    /// The fd becomes readable when a completion event arrives on an
+    /// associated CQ.
+    pub fn fd(&self) -> i32 {
+        unsafe { (*self.inner).fd }
+    }
+
+    /// Wait for and retrieve the next completion event.
+    ///
+    /// Blocks until an event arrives. Returns the CQ that generated
+    /// the event and an opaque context pointer.
+    ///
+    /// # Important
+    ///
+    /// After this call, you **must** call [`ack_events`](CqEventChannel::ack_events)
+    /// to acknowledge the event, otherwise no further events will be
+    /// generated for that CQ.
+    pub fn get_event(&self) -> Result<(*mut ibv_cq, *mut c_void), RdmaError> {
+        let mut cq: *mut ibv_cq = std::ptr::null_mut();
+        let mut cq_context: *mut c_void = std::ptr::null_mut();
+
+        let ret = unsafe { ibv_get_cq_event(self.inner, &mut cq, &mut cq_context) };
+
+        if ret != 0 {
+            return Err(RdmaError::HardwareError(format!(
+                "ibv_get_cq_event failed with return code {}",
+                ret
+            )));
+        }
+
+        Ok((cq, cq_context))
+    }
+
+    /// Acknowledge completion events on a CQ.
+    ///
+    /// Must be called after [`get_event`](CqEventChannel::get_event) for
+    /// the number of events consumed. The CQ will not generate further
+    /// events until acknowledged.
+    ///
+    /// # Parameters
+    ///
+    /// * `cq` — The completion queue from [`get_event`].
+    /// * `count` — Number of events to acknowledge (typically 1).
+    pub fn ack_events(&self, cq: &CompletionQueue, count: u32) {
+        unsafe {
+            ibv_ack_cq_events(cq.as_ptr(), count);
+        }
+    }
+
+    /// Get the raw `ibv_comp_channel` pointer for use in FFI calls.
+    pub fn as_ptr(&self) -> *mut ibv_comp_channel {
+        self.inner
+    }
+}
+
+impl Drop for CqEventChannel {
+    fn drop(&mut self) {
+        let ret = unsafe { ibv_destroy_comp_channel(self.inner) };
+        if ret != 0 {
+            tracing::error!(
+                "ibv_destroy_comp_channel failed with return code {}; potential resource leak",
+                ret
+            );
+        }
+    }
+}
+
+// SAFETY: ibv_comp_channel can be sent and shared across threads (per libibverbs docs).
+unsafe impl Send for CqEventChannel {}
+unsafe impl Sync for CqEventChannel {}

@@ -140,8 +140,8 @@ impl ClientWriter {
         transport: &dyn Transport,
         hash_table_vaddr: u64,
         hash_table_rkey: u32,
-        _large_obj_vaddr: u64,
-        _large_obj_rkey: u32,
+        free_list_vaddr: u64,
+        free_list_rkey: u32,
         bucket_count: u64,
         lkey: u32,
     ) -> Result<WriteResult, RdmaError> {
@@ -152,6 +152,15 @@ impl ClientWriter {
         let addr_h1 = hash_table_vaddr + h1 * bucket_size;
         let addr_h2 = hash_table_vaddr + h2 * bucket_size;
 
+        // Build the distributed extent allocator for Extent‑mode writes.
+        // In production this would be passed in; for now we construct it from
+        // the transport reference (via Arc::new on a trait object would require
+        // the transport to be Arc'd upstream — here we clone the Arc if available
+        // or create a lightweight wrapper). For the T9‑B implementation we accept
+        // that the transport is `&dyn Transport` and we cannot easily Arc it.
+        // The caller should provide an Arc<dyn Transport> when constructing the
+        // allocator externally.
+
         // Try direct insert at h1.
         if Self::try_insert_remote_at(
             key,
@@ -160,6 +169,8 @@ impl ClientWriter {
             transport,
             addr_h1,
             hash_table_rkey,
+            free_list_vaddr,
+            free_list_rkey,
             lkey,
             bucket_size,
         )
@@ -178,6 +189,8 @@ impl ClientWriter {
             transport,
             addr_h2,
             hash_table_rkey,
+            free_list_vaddr,
+            free_list_rkey,
             lkey,
             bucket_size,
         )
@@ -202,6 +215,8 @@ impl ClientWriter {
         transport: &dyn Transport,
         remote_addr: u64,
         remote_rkey: u32,
+        free_list_vaddr: u64,
+        free_list_rkey: u32,
         lkey: u32,
         bucket_size: u64,
     ) -> Result<bool, RdmaError> {
@@ -232,13 +247,54 @@ impl ClientWriter {
                     new_bucket.set_inline_value(&inline_val);
                 }
                 BucketMode::Extent => {
-                    // NOTE: A full distributed implementation would perform
-                    // an extent allocation via a control-plane RPC or a
-                    // remote CAS on the free-list. For now, we reject Extent
-                    // inserts over the transport layer.
-                    return Err(RdmaError::Internal(
-                        "Extent mode not yet supported over transport layer".into(),
-                    ));
+                    // Perform a CAS bump allocation on the FreeList region.
+                    // Phase 1: read current bump_offset.
+                    let mut old_buf = [0u8; 8];
+                    transport
+                        .read(&mut old_buf, lkey, free_list_vaddr, free_list_rkey)
+                        .await?;
+                    let old_offset = u64::from_le_bytes(old_buf);
+
+                    let total = crate::engine::extent::extent_total(value.len() as u64);
+                    let new_offset = old_offset + total;
+
+                    // Phase 2: CAS bump_offset to reserve space.
+                    let cas_ok = transport
+                        .cas(old_offset, new_offset, lkey, free_list_vaddr, free_list_rkey)
+                        .await?;
+                    if !cas_ok {
+                        return Err(RdmaError::CasFailed);
+                    }
+
+                    // Phase 3: write ExtentHeaderV2 (checksum=0) + payload + checksum.
+                    use crate::engine::layout::ExtentHeaderV2;
+                    let extent_addr = free_list_vaddr + old_offset;
+                    let header_size = crate::engine::extent::HEADER_SIZE;
+
+                    let mut hdr = ExtentHeaderV2::zeroed();
+                    hdr.magic = crate::engine::layout::EXTENT_MAGIC;
+                    hdr.version = 1;
+                    hdr.data_len = value.len() as u32;
+                    hdr.checksum = 0;
+                    let hdr_bytes = bytemuck::bytes_of(&hdr);
+
+                    transport
+                        .write(hdr_bytes, lkey, extent_addr, free_list_rkey)
+                        .await?;
+
+                    // Write payload.
+                    transport
+                        .write(value, lkey, extent_addr + header_size, free_list_rkey)
+                        .await?;
+
+                    // Write final checksum.
+                    let checksum = xxhash_rust::xxh64::xxh64(value, 0);
+                    let checksum_addr = extent_addr + 24; // checksum at offset 24 in V2
+                    transport
+                        .write(&checksum.to_le_bytes(), lkey, checksum_addr, free_list_rkey)
+                        .await?;
+
+                    new_bucket.set_extent_ref(old_offset, value.len() as u64);
                 }
             }
 

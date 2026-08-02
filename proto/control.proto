@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package rdmas.control;
 
+import "google/protobuf/empty.proto";
+
 // Region type: identifies which memory region on the server.
 enum RegionType {
     HASH_TABLE = 0;
@@ -35,6 +37,7 @@ message HeartbeatRequest {
 message HeartbeatResponse {
     uint64 generation = 1;  // current server generation
     bool reconnect = 2;     // true if client should re-fetch metadata
+    uint32 server_version = 3; // server protocol version
 }
 
 // Discovery: client requests server metadata.
@@ -51,6 +54,34 @@ message DeregisterRequest {
 
 message DeregisterResponse {}
 
+// SyncFreeList: client pushes freed extent offsets to server for GC accounting.
+message SyncFreeListRequest {
+    repeated uint64 freed_offsets = 1;
+    uint64 generation = 2;
+}
+
+message SyncFreeListResponse {
+    uint32 accepted_count = 1;
+}
+
+// Version negotiation (T10-E).
+message GetVersionRequest {}
+
+message GetVersionResponse {
+    uint32 service_version = 1;
+    string service_version_str = 2;  // e.g. "1.0.0"
+    uint32 min_compatible_version = 3;
+}
+
+// Watermark notification (T10-C): server pushes to client when thresholds exceeded.
+// (Stub: actual push requires streaming or client polling.)
+message WatermarkNotification {
+    double table_load = 1;
+    double extent_usage = 2;
+    double slab_usage = 3;
+    repeated string exceeded_regions = 4;
+}
+
 // Control plane service.
 service ControlPlane {
     // Client discovers server metadata (MR regions, bucket count).
@@ -61,4 +92,13 @@ service ControlPlane {
 
     // Client gracefully leaves.
     rpc Deregister(DeregisterRequest) returns (DeregisterResponse);
+
+    // Sync freed extent offsets from client to server (GC accounting).
+    rpc SyncFreeList(SyncFreeListRequest) returns (SyncFreeListResponse);
+
+    // Protocol version negotiation (T10-E).
+    rpc GetVersion(GetVersionRequest) returns (GetVersionResponse);
+
+    // Watermark notification push (T10-C).
+    rpc NotifyWatermark(WatermarkNotification) returns (google.protobuf.Empty);
 }

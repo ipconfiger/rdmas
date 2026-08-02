@@ -274,6 +274,118 @@ pub struct ExtentHeader {
 const _: () = assert!(core::mem::size_of::<ExtentHeader>() == 24);
 
 // ---------------------------------------------------------------------------
+// ExtentHeaderV2 — large‑object metadata (32 bytes, Wave 9 T9-D)
+// ---------------------------------------------------------------------------
+
+/// Header placed at the start of every allocated extent in the large‑object
+/// region (V2 format, 32 bytes).
+///
+/// # Layout (32 bytes)
+///
+/// | Offset | Field        | Size |
+/// |--------|--------------|------|
+/// | 0      | `magic`      | 4    |
+/// | 4      | `version`    | 1    |
+/// | 5      | `_pad1`      | 3    |
+/// | 8      | `data_len`   | 4    |
+/// | 12     | `_pad2`      | 4    |
+/// | 16     | `epoch_mark` | 8    |
+/// | 24     | `checksum`   | 8    |
+///
+/// `checksum` is an XXH64 of the payload. A value of 0 means the write is
+/// still in progress. Readers must verify checksum before trusting the data.
+#[derive(Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
+pub struct ExtentHeaderV2 {
+    /// Magic constant: `EXTENT_MAGIC = 0x52444D41` ("RDMA").
+    pub magic: u32,
+
+    /// Header format version: 1 = ExtentHeaderV2.
+    /// 0 is reserved for V1 (24‑byte ExtentHeader).
+    pub version: u8,
+
+    /// Padding: align `data_len` to a 4‑byte boundary.
+    pub _pad1: [u8; 3],
+
+    /// Payload length in bytes (not including this header). u32 supports up to
+    /// 4 GiB per extent.
+    pub data_len: u32,
+
+    /// Padding: align `epoch_mark` to an 8‑byte boundary.
+    pub _pad2: [u8; 4],
+
+    /// Global‑GC death timestamp (epoch). Stale extents whose epoch has
+    /// passed are eligible for collection.
+    pub epoch_mark: u64,
+
+    /// XXH64 checksum of the payload data. 0 = write‑in‑progress.
+    pub checksum: u64,
+}
+
+// --- Compile‑time assertions for V2 ---
+
+const _: () = assert!(core::mem::size_of::<ExtentHeaderV2>() == 32);
+const _: () = assert!(core::mem::align_of::<ExtentHeaderV2>() >= 8);
+
+/// Size of an [`ExtentHeaderV2`] in bytes.
+pub const HEADER_SIZE_V2: u64 = 32;
+
+impl ExtentHeaderV2 {
+    /// Compute the total extent footprint (header + data, 8‑byte aligned).
+    #[inline]
+    pub fn header_total(data_len: u64) -> u64 {
+        crate::engine::extent::align_up(HEADER_SIZE_V2 + data_len, 8)
+    }
+}
+
+/// Check whether a byte slice starts with a valid V2 header (magic + version == 1).
+#[inline]
+pub fn is_v2(header_bytes: &[u8]) -> bool {
+    if header_bytes.len() < 5 {
+        return false;
+    }
+    let magic = u32::from_le_bytes(header_bytes[0..4].try_into().unwrap());
+    magic == EXTENT_MAGIC && header_bytes[4] == 1
+}
+
+/// Return the header size in bytes for a given extent header version.
+///
+/// - Version 0 (V1 / original [`ExtentHeader`]): 24 bytes
+/// - Version 1 (V2 / [`ExtentHeaderV2`]): 32 bytes
+/// - Unknown version: defaults to 32 bytes (conservative V2 fallback)
+#[inline]
+pub const fn header_size_for_version(version: u8) -> u64 {
+    match version {
+        0 => 24,
+        _ => 32,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FreeListHeader — bump-allocator metadata for the Free List region (64 bytes)
+// ---------------------------------------------------------------------------
+
+/// Header at the start of the Free List region.
+/// Clients CAS on `bump_offset` to atomically reserve extent space.
+#[derive(Clone, Copy)]
+#[repr(C, align(64))]
+pub struct FreeListHeader {
+    /// Monotonic bump allocator offset.
+    /// Initialized to 0; advanced by extent_total(data_len) on each allocation.
+    pub bump_offset: u64,
+    /// Padding to fill a full cache line (64 bytes total).
+    pub _pad: [u8; 56],
+}
+
+// Safety: FreeListHeader is composed entirely of Pod/Zeroable primitives
+// (u64 and [u8; 56]), has no padding bytes, and all bit patterns are valid.
+unsafe impl Pod for FreeListHeader {}
+unsafe impl Zeroable for FreeListHeader {}
+
+// Compile-time size check
+const _: () = assert!(std::mem::size_of::<FreeListHeader>() == 64);
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -619,5 +731,50 @@ mod tests {
     #[test]
     fn test_extent_header_size() {
         assert_eq!(core::mem::size_of::<ExtentHeader>(), 24);
+    }
+
+    #[test]
+    fn test_extent_header_v2_size() {
+        assert_eq!(core::mem::size_of::<ExtentHeaderV2>(), 32);
+    }
+
+    #[test]
+    fn test_header_size_for_version() {
+        assert_eq!(header_size_for_version(0), 24); // V1
+        assert_eq!(header_size_for_version(1), 32); // V2
+        assert_eq!(header_size_for_version(2), 32); // Unknown → V2 fallback
+        assert_eq!(header_size_for_version(255), 32); // Unknown max
+    }
+
+    // -----------------------------------------------------------------------
+    // FreeListHeader tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_free_list_header_default_is_zero() {
+        let h = FreeListHeader {
+            bump_offset: 0,
+            _pad: [0u8; 56],
+        };
+        assert_eq!(h.bump_offset, 0);
+        // Verify zeroed padding bytes
+        assert!(h._pad.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_free_list_header_size() {
+        assert_eq!(core::mem::size_of::<FreeListHeader>(), 64);
+    }
+
+    #[test]
+    fn test_free_list_header_is_pod() {
+        // Must compile: Pod types round-trip through bytemuck
+        let h = FreeListHeader {
+            bump_offset: 42,
+            _pad: [0u8; 56],
+        };
+        let bytes = bytemuck::bytes_of(&h);
+        let h2: &FreeListHeader = bytemuck::from_bytes(bytes);
+        assert_eq!(h2.bump_offset, 42);
     }
 }

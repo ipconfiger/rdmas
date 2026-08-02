@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::thread;
 
+use rdmas::engine::bootstrap::BootstrappedEngine;
 use rdmas::engine::cuckoo::CuckooTable;
 use rdmas::engine::extent::LargeObjectRegion;
 use rdmas::engine::layout::{BucketMode, HashedKey};
@@ -213,4 +214,92 @@ fn test_extent_gc_sweep() {
 
     // o2 should still be readable
     assert!(region.read(o2).is_some());
+}
+
+// ============================================================================
+// Test 7: Slab allocator integration with engine (T9-C)
+// ============================================================================
+
+#[test]
+fn test_slab_with_engine() {
+    // Create engine with slab support: 64-byte chunks, 10 total chunks.
+    let mut engine = BootstrappedEngine::bootstrap_with_slab(
+        64,            // buckets
+        1024,          // large object region
+        16,            // max_kick
+        64,            // slab chunk size
+        640,           // slab region (10 chunks × 64 bytes)
+    );
+
+    assert_eq!(engine.slab_chunk_count(), 10);
+
+    // Allocate chunks and verify indices are sequential
+    let c0 = engine.slab.allocate_chunk().unwrap();
+    let c1 = engine.slab.allocate_chunk().unwrap();
+    let c2 = engine.slab.allocate_chunk().unwrap();
+
+    assert_eq!(c0, 0);
+    assert_eq!(c1, 1);
+    assert_eq!(c2, 2);
+
+    // Verify offsets
+    assert_eq!(engine.slab.chunk_offset(c0), 0);
+    assert_eq!(engine.slab.chunk_offset(c1), 64);
+    assert_eq!(engine.slab.chunk_offset(c2), 128);
+
+    // Free a chunk and re-allocate
+    engine.slab.free_chunk(c1);
+    let c3 = engine.slab.allocate_chunk().unwrap();
+    assert_eq!(c3, 1, "should reuse freed chunk index 1");
+
+    // Verify stats
+    let stats = engine.stats();
+    assert_eq!(stats.slab_total_chunks, 10);
+    assert_eq!(stats.slab_allocated_chunks, 3);
+    assert_eq!(stats.slab_free_chunks, 7);
+}
+
+#[test]
+fn test_slab_full_engine_capacity() {
+    let mut engine = BootstrappedEngine::bootstrap_with_slab(
+        64, 1024, 16,
+        128,  // chunk size
+        1280, // 10 chunks
+    );
+
+    assert_eq!(engine.slab_chunk_count(), 10);
+    assert_eq!(engine.slab.capacity(), 1280);
+
+    // Allocate all 10 chunks
+    for i in 0..10 {
+        let idx = engine.slab.allocate_chunk().unwrap();
+        assert_eq!(idx, i);
+    }
+
+    // Should be full
+    assert!(engine.slab.allocate_chunk().is_none());
+
+    let stats = engine.stats();
+    assert_eq!(stats.slab_allocated_chunks, 10);
+    assert_eq!(stats.slab_free_chunks, 0);
+}
+
+#[test]
+fn test_slab_write_and_read_within_chunks() {
+    let mut engine = BootstrappedEngine::bootstrap_with_slab(
+        64, 1024, 16,
+        256,       // 256-byte chunks
+        256 * 4,   // 4 chunks
+    );
+
+    // Allocate all 4 chunks
+    let chunks: Vec<u64> = (0..4)
+        .map(|_| engine.slab.allocate_chunk().unwrap())
+        .collect();
+
+    // Each chunk offset should be chunk_index * 256
+    for (i, &chunk_idx) in chunks.iter().enumerate() {
+        let expected_offset = (i as u64) * 256;
+        assert_eq!(engine.slab.chunk_offset(chunk_idx), expected_offset);
+    }
 }

@@ -226,6 +226,23 @@ pub fn verify_read(guard: &ReadGuard, bucket: &AtomicBucket) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Extent checksum verification (T9-D)
+// ---------------------------------------------------------------------------
+
+/// Verify payload integrity using [`ExtentHeaderV2`] checksum.
+///
+/// Returns `true` if the checksum matches (and is non‑zero, meaning the write
+/// is complete). A zero checksum indicates a write‑in‑progress that should not
+/// be consumed.
+pub fn verify_extent_checksum(header: &ExtentHeaderV2, payload: &[u8]) -> bool {
+    if header.checksum == 0 {
+        return false; // write in progress
+    }
+    let computed = xxhash_rust::xxh64::xxh64(payload, 0);
+    computed == header.checksum
+}
+
+// ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
 

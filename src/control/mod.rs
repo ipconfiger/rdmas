@@ -12,3 +12,8 @@ pub mod client;
 
 /// Asynchronous replication: backup node via RDMA WRITE (T4-D)
 pub mod replication;
+
+/// Multi-tenant namespace isolation via hash-seed mixing (T11-C)
+pub mod tenant;
+
+pub use tenant::TenantNamespace;

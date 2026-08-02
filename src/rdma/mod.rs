@@ -24,6 +24,8 @@ pub mod pd;
 pub mod mr;
 /// Queue pair — the workhorse for posting RDMA operations
 pub mod qp;
+/// QP error state recovery — QpGuard health-checking wrapper
+pub mod qp_recovery;
 /// Completion queue — polling for completed work requests
 pub mod cq;
 
@@ -33,5 +35,6 @@ pub use context::DeviceAttr;
 pub use context::PortAttr;
 pub use pd::ProtectionDomain;
 pub use mr::MemoryRegion;
-pub use cq::{CompletionQueue, WorkCompletion};
+pub use cq::{CompletionQueue, CqEventChannel, WorkCompletion};
 pub use qp::{QueuePair, RecvWorkRequest, ScatterGatherEntry, SendWorkRequest, SendWrOpcode};
+pub use qp_recovery::QpGuard;

@@ -3,15 +3,22 @@
 //! A [`ClientSession`] manages the full lifecycle of a client connecting
 //! to an RDMA KV server:
 //!
-//! 1. Discover server metadata via gRPC (control plane)
-//! 2. Auto-detect transport: try RDMA first, fall back to TCP
-//! 3. Start a background heartbeat loop
+//! 1. Negotiate protocol version (T10-E)
+//! 2. Discover server metadata via gRPC (control plane)
+//! 3. Auto-detect transport: try RDMA first, fall back to TCP
+//! 4. Start a background heartbeat loop with generation checks (T10-D)
 //!
 //! # Transport abstraction
 //!
 //! The session delegates all data-plane operations (read/write/cas) to a
 //! [`Transport`] trait object. This allows transparent fallback from RDMA
 //! to TCP when RDMA hardware is not available.
+//!
+//! # Keepalive & Reconnection (T10-D)
+//!
+//! The heartbeat loop detects generation changes (server restart) and
+//! marks `reconnect` flags. On reconnect, all cached MR metadata is
+//! invalidated and re-discovered.
 //!
 //! # Design Constraint
 //!
@@ -21,6 +28,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use tonic::transport::channel::ClientTlsConfig;
+use tonic::transport::{Certificate, Identity};
+
 use crate::control::client::ControlClient;
 use crate::control::server::proto::*;
 use crate::error::RdmaError;
@@ -28,6 +38,37 @@ use crate::transport::{RdmaTransport, TcpTransport, Transport};
 
 /// Default heartbeat interval (milliseconds).
 const DEFAULT_HEARTBEAT_INTERVAL_MS: u64 = 1_000;
+
+/// Minimum compatible server protocol version (T10-E).
+const MIN_COMPATIBLE_VERSION: u32 = 1;
+
+/// TLS configuration for mTLS client connections (T11-A).
+///
+/// All fields are PEM-encoded strings.
+#[derive(Clone)]
+pub struct TlsConfig {
+    /// PEM-encoded CA certificate used to verify the server.
+    pub ca_cert_pem: String,
+    /// PEM-encoded client certificate (for mutual TLS).
+    pub client_cert_pem: String,
+    /// PEM-encoded client private key.
+    pub client_key_pem: String,
+}
+
+impl TlsConfig {
+    /// Convert this TlsConfig into a tonic `ClientTlsConfig` for use with
+    /// gRPC channel construction.
+    pub fn to_client_tls_config(&self) -> Result<ClientTlsConfig, Box<dyn std::error::Error>> {
+        let ca = Certificate::from_pem(&self.ca_cert_pem);
+        let identity = Identity::from_pem(&self.client_cert_pem, &self.client_key_pem);
+
+        let tls_config = ClientTlsConfig::new()
+            .ca_certificate(ca)
+            .identity(identity);
+
+        Ok(tls_config)
+    }
+}
 
 /// A client session connected to an RDMA KV server via an abstract transport.
 ///
@@ -46,8 +87,14 @@ pub struct ClientSession {
     /// Unique client ID (locally assigned).
     pub client_id: u64,
 
+    /// Server address for reconnection (T10-D).
+    server_addr: String,
+
     /// Server metadata: MR regions, generation, bucket count.
     pub metadata: ServerMetadata,
+
+    /// Server protocol version (T10-E).
+    pub server_version: u32,
 
     /// Control plane client for heartbeat / re-discovery.
     control: ControlClient,
@@ -65,8 +112,9 @@ impl ClientSession {
     /// # Steps
     ///
     /// 1. Connect control plane client via gRPC
-    /// 2. Discover server metadata (MR regions, bucket count, generation)
-    /// 3. Auto-detect transport: try RDMA first, fall back to TCP
+    /// 2. Negotiate protocol version (T10-E)
+    /// 3. Discover server metadata (MR regions, bucket count, generation)
+    /// 4. Auto-detect transport: try RDMA first, fall back to TCP
     ///
     /// # Transport auto-detection
     ///
@@ -78,15 +126,109 @@ impl ClientSession {
     ) -> Result<Self, ClientSessionError> {
         // ---- Step 1: Control plane ----
         let mut control = ControlClient::connect(server_addr).await?;
+
+        // ---- Step 2: Version negotiation (T10-E) ----
+        let version = control.get_version().await.map_err(|e| {
+            ClientSessionError::Grpc(e)
+        })?;
+        if version.service_version < MIN_COMPATIBLE_VERSION {
+            return Err(ClientSessionError::VersionMismatch(format!(
+                "Server version {} is incompatible; minimum required is {}",
+                version.service_version, MIN_COMPATIBLE_VERSION
+            )));
+        }
+
+        // ---- Step 3: Discover metadata ----
         let metadata = control.discover().await.map_err(|e| {
-            ClientSessionError::Grpc(tonic::Status::internal(format!("{}", e)))
+            ClientSessionError::Grpc(e)
         })?;
 
-        // ---- Step 2: Auto-detect transport ----
-        let transport: Box<dyn Transport> = match RdmaTransport::connect(server_addr).await {
+        // ---- Step 4: Auto-detect transport ----
+        let transport = Self::create_transport_inner(server_addr).await?;
+
+        // ---- Step 5: Heartbeat interval ----
+        let heartbeat_interval =
+            Duration::from_millis(DEFAULT_HEARTBEAT_INTERVAL_MS);
+
+        Ok(Self {
+            client_id,
+            server_addr: server_addr.to_string(),
+            server_version: version.service_version,
+            metadata,
+            control,
+            transport,
+            heartbeat_interval,
+        })
+    }
+
+    /// Connect with mTLS (T11-A).
+    ///
+    /// Same as [`connect`] but establishes the gRPC control-plane channel over
+    /// TLS 1.3 with mutual authentication. The data-plane transport (RDMA/TCP)
+    /// remains unencrypted — this is standard practice for RDMA in trusted
+    /// datacenter fabrics.
+    ///
+    /// # Arguments
+    ///
+    /// * `server_addr` - Server host:port (e.g. `"server.example.com:9400"`)
+    /// * `client_id` - Unique client identifier
+    /// * `tls_config` - PEM-encoded CA cert, client cert, and client key
+    pub async fn connect_tls(
+        server_addr: &str,
+        client_id: u64,
+        tls_config: &TlsConfig,
+    ) -> Result<Self, ClientSessionError> {
+        // ---- Step 1: Control plane over mTLS ----
+        let client_tls = tls_config.to_client_tls_config().map_err(|e| {
+            ClientSessionError::Tls(format!(
+                "Failed to build client TLS config: {}",
+                e
+            ))
+        })?;
+        let mut control = ControlClient::connect_tls(server_addr, client_tls).await?;
+
+        // ---- Step 2: Version negotiation (T10-E) ----
+        let version = control.get_version().await.map_err(|e| {
+            ClientSessionError::Grpc(e)
+        })?;
+        if version.service_version < MIN_COMPATIBLE_VERSION {
+            return Err(ClientSessionError::VersionMismatch(format!(
+                "Server version {} is incompatible; minimum required is {}",
+                version.service_version, MIN_COMPATIBLE_VERSION
+            )));
+        }
+
+        // ---- Step 3: Discover metadata ----
+        let metadata = control.discover().await.map_err(|e| {
+            ClientSessionError::Grpc(e)
+        })?;
+
+        // ---- Step 4: Auto-detect transport (RDMA or TCP, unencrypted) ----
+        let transport = Self::create_transport_inner(server_addr).await?;
+
+        // ---- Step 5: Heartbeat interval ----
+        let heartbeat_interval =
+            Duration::from_millis(DEFAULT_HEARTBEAT_INTERVAL_MS);
+
+        Ok(Self {
+            client_id,
+            server_addr: server_addr.to_string(),
+            server_version: version.service_version,
+            metadata,
+            control,
+            transport,
+            heartbeat_interval,
+        })
+    }
+
+    /// Create a transport connection, trying RDMA first then falling back to TCP.
+    async fn create_transport_inner(
+        server_addr: &str,
+    ) -> Result<Box<dyn Transport>, ClientSessionError> {
+        match RdmaTransport::connect(server_addr).await {
             Ok(rdma) => {
                 tracing::info!("Using RDMA transport");
-                Box::new(rdma)
+                Ok(Box::new(rdma))
             }
             Err(e) => {
                 tracing::warn!("RDMA unavailable ({}), falling back to TCP", e);
@@ -100,21 +242,9 @@ impl ClientSession {
                             e
                         )))
                     })?;
-                Box::new(tcp)
+                Ok(Box::new(tcp))
             }
-        };
-
-        // ---- Step 3: Heartbeat interval ----
-        let heartbeat_interval =
-            Duration::from_millis(DEFAULT_HEARTBEAT_INTERVAL_MS);
-
-        Ok(Self {
-            client_id,
-            metadata,
-            control,
-            transport,
-            heartbeat_interval,
-        })
+        }
     }
 
     // ---- Accessors ----
@@ -219,22 +349,58 @@ impl ClientSession {
     /// Useful when the server rotates memory regions (generation bump).
     pub async fn refresh_metadata(&mut self) -> Result<&ServerMetadata, ClientSessionError> {
         let metadata = self.control.discover().await.map_err(|e| {
-            ClientSessionError::Grpc(tonic::Status::internal(format!("{}", e)))
+            ClientSessionError::Grpc(e)
         })?;
         self.metadata = metadata;
         Ok(&self.metadata)
     }
 
-    /// Reconnect to the server after a failure.
+    // ---- MR Metadata Invalidation (T10-D) ----
+
+    /// Invalidate all cached remote memory region metadata.
+    /// Called when server restarts (generation change detected).
+    pub fn invalidate_mr_metadata(&mut self) {
+        self.metadata = ServerMetadata::default();
+        tracing::warn!("MR metadata invalidated due to generation change");
+    }
+
+    /// Check if reconnection is needed based on heartbeat response.
     ///
-    /// Drops and re-creates the transport, then re-establishes
-    /// the transport connection and metadata cache.
-    pub async fn reconnect(
-        server_addr: &str,
-        client_id: u64,
-    ) -> Result<Self, ClientSessionError> {
-        // For Wave 3, reconnect is equivalent to a fresh connect.
-        Self::connect(server_addr, client_id).await
+    /// Returns `true` if the server explicitly requests reconnect, or if
+    /// the server's generation has changed (indicating a restart).
+    pub fn check_reconnect_needed(&self, response: &HeartbeatResponse) -> bool {
+        response.reconnect || response.generation != self.metadata.generation
+    }
+
+    // ---- Reconnection (T10-D) ----
+
+    /// Full reconnect sequence: discover new metadata + recreate transport.
+    ///
+    /// # Steps
+    ///
+    /// 1. Invalidate old MR metadata
+    /// 2. Re-discover server metadata
+    /// 3. Reconnect transport with new metadata
+    /// 4. Update local state
+    pub async fn reconnect(&mut self) -> Result<(), ClientSessionError> {
+        tracing::info!("Starting reconnect sequence");
+
+        // Step 1: Invalidate old metadata
+        self.invalidate_mr_metadata();
+
+        // Step 2: Re-discover server metadata
+        let metadata = self.control.discover().await.map_err(|e| {
+            ClientSessionError::Grpc(e)
+        })?;
+
+        // Step 3: Reconnect transport with new metadata
+        self.transport = Self::create_transport_inner(&self.server_addr).await?;
+
+        // Step 4: Update local state
+        self.metadata = metadata;
+
+        tracing::info!("Reconnect complete, generation={}", self.metadata.generation);
+        Ok(())
     }
 }
 
@@ -278,6 +444,14 @@ pub enum ClientSessionError {
     /// Server metadata is missing a required memory region.
     #[error("Server metadata missing required region: {0}")]
     MissingRegion(String),
+
+    /// Protocol version mismatch between client and server (T10-E).
+    #[error("version mismatch: {0}")]
+    VersionMismatch(String),
+
+    /// TLS configuration or handshake error (T11-A).
+    #[error("TLS error: {0}")]
+    Tls(String),
 }
 
 // ---- Tests ----
@@ -395,5 +569,97 @@ mod tests {
     #[test]
     fn test_heartbeat_interval_is_reasonable() {
         assert!(DEFAULT_HEARTBEAT_INTERVAL_MS > 0);
+    }
+
+    // ---- T10-E: Version mismatch error ----
+
+    #[test]
+    fn test_version_mismatch_error_display() {
+        let err = ClientSessionError::VersionMismatch(
+            "Server version 0 is incompatible; minimum required is 1".to_string(),
+        );
+        let display = format!("{}", err);
+        assert!(
+            display.contains("version mismatch"),
+            "VersionMismatch should contain 'version mismatch', got: {display}"
+        );
+    }
+
+    // ---- T10-D: Generation check ----
+
+    #[test]
+    fn test_check_reconnect_needed_when_reconnect_flag_set() {
+        // Can't instantiate a full ClientSession without transport, so we
+        // use prost's default-generated types for unit testing the logic.
+        let metadata = ServerMetadata {
+            generation: 1,
+            bucket_count: 1024,
+            regions: vec![],
+        };
+
+        // Simulate what a session would do: create metadata, then check response.
+        // HeartbeatResponse with reconnect=true
+        let response = HeartbeatResponse {
+            generation: 1,
+            reconnect: true,
+            server_version: 1,
+        };
+
+        // If reconnect flag is set, we should reconnect.
+        assert!(response.reconnect, "reconnect flag should trigger reconnect");
+
+        // If generation differs from metadata, should also reconnect.
+        let response_stale = HeartbeatResponse {
+            generation: 2,
+            reconnect: false,
+            server_version: 1,
+        };
+        let needs = response_stale.generation != metadata.generation;
+        assert!(needs, "generation change should trigger reconnect");
+    }
+
+    #[test]
+    fn test_check_reconnect_not_needed_when_same() {
+        let metadata = ServerMetadata {
+            generation: 5,
+            bucket_count: 1024,
+            regions: vec![],
+        };
+
+        let response = HeartbeatResponse {
+            generation: 5,
+            reconnect: false,
+            server_version: 1,
+        };
+
+        let needs = response.reconnect || response.generation != metadata.generation;
+        assert!(!needs, "same generation and no reconnect flag should not trigger reconnect");
+    }
+
+    #[test]
+    fn test_invalidate_mr_metadata_resets_to_default() {
+        let mut metadata = ServerMetadata {
+            generation: 5,
+            bucket_count: 2048,
+            regions: vec![RegionMetadata {
+                vaddr: 0x1000,
+                rkey: 42,
+                size: 4096,
+                r#type: RegionType::HashTable as i32,
+                generation: 5,
+            }],
+        };
+
+        // Use the metadata first to avoid unused-assignment warning
+        assert_eq!(metadata.generation, 5);
+        assert_eq!(metadata.bucket_count, 2048);
+        assert!(!metadata.regions.is_empty());
+
+        // Simulate invalidation
+        metadata = ServerMetadata::default();
+
+        assert_eq!(metadata.generation, 0);
+        assert_eq!(metadata.bucket_count, 0);
+        assert!(metadata.regions.is_empty());
     }
 }

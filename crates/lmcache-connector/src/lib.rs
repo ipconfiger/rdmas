@@ -24,10 +24,18 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
+#[cfg(feature = "director")]
+mod director;
+#[cfg(feature = "director")]
+use director::DirectorIntegration;
+#[cfg(feature = "director")]
+use rdmas_director::proto::InstanceRole;
+
 use pyo3::prelude::*;
 use rdmas::engine::cuckoo::CuckooTable;
 use rdmas::engine::extent::LargeObjectRegion;
 use rdmas::engine::layout::{BucketMode, HashedKey};
+use rdmas::engine::lru::LruTracker;
 use xxhash_rust::xxh64::xxh64;
 
 // ---------------------------------------------------------------------------
@@ -126,6 +134,37 @@ pub struct RDMANativeConnector {
 
     /// Number of background worker threads.
     _num_workers: usize,
+
+    /// Optional Rectifiers Director integration for reporting cache
+    /// operations (store/remove) to the Director gRPC service.
+    #[cfg(feature = "director")]
+    director: Option<Arc<DirectorIntegration>>,
+
+    /// Unique instance identifier for Director registration.
+    /// Auto-generated from node_id + timestamp if not provided via adapter_params.
+    #[cfg(feature = "director")]
+    instance_id: String,
+
+    /// Handle to the background heartbeat task; aborted on `close()`.
+    #[cfg(feature = "director")]
+    heartbeat_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+
+    /// Pending store operation keys, keyed by future_id.
+    /// Entries are inserted in `submit_batch_set` and consumed in
+    /// `drain_completions` for Director reporting.
+    #[cfg(feature = "director")]
+    pending_reports: Arc<Mutex<HashMap<u64, Vec<String>>>>,
+
+    /// Pending remove operation keys, keyed by future_id.
+    /// Entries are inserted in `submit_batch_delete` and consumed
+    /// in `drain_completions` for Director reporting.
+    #[cfg(feature = "director")]
+    pending_removes: Arc<Mutex<HashMap<u64, Vec<String>>>>,
+
+    /// LRU access tracker for cache eviction under memory pressure (T10-A).
+    /// Records key accesses and selects eviction candidates when the
+    /// large-object region runs out of space.
+    lru: LruTracker,
 }
 
 #[pymethods]
@@ -138,13 +177,17 @@ impl RDMANativeConnector {
     /// - `server`: Server address (unused in local simulation).
     /// - `num_workers`: Number of background worker threads (default 4).
     /// - `batch_chunk_num_bytes`: Batch chunk threshold in bytes (default 16 MiB).
+    /// - `adapter_params`: Optional extra parameters. When the `director`
+    ///   feature is enabled, recognized keys include `director_addr`,
+    ///   `node_id`, `tenant_id`, `model_name`, and `block_size`.
     #[new]
-    #[pyo3(signature = (device="", server="", num_workers=4, batch_chunk_num_bytes=16777216))]
+    #[pyo3(signature = (device="", server="", num_workers=4, batch_chunk_num_bytes=16777216, adapter_params=None))]
     fn new(
         device: &str,
         server: &str,
         num_workers: usize,
         batch_chunk_num_bytes: u64,
+        adapter_params: Option<HashMap<String, String>>,
     ) -> PyResult<Self> {
         // device and server are unused in local simulation mode.
         let _ = (device, server);
@@ -188,6 +231,168 @@ impl RDMANativeConnector {
             workers.push(handle);
         }
 
+        // ── Director integration (feature-gated) ──
+        #[cfg(feature = "director")]
+        let (director, instance_id, heartbeat_handle): (
+            Option<Arc<DirectorIntegration>>,
+            String,
+            Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+        ) = {
+            let hb: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>> =
+                Arc::new(Mutex::new(None));
+
+            if let Some(ref params) = adapter_params {
+                if let Some(director_addr) = params.get("director_addr") {
+                    let node_id =
+                        params.get("node_id").map(|s| s.as_str()).unwrap_or("");
+                    let tenant_id =
+                        params.get("tenant_id").map(|s| s.as_str()).unwrap_or("");
+                    let model_name =
+                        params.get("model_name").map(|s| s.as_str()).unwrap_or("");
+                    let block_size: u32 = params
+                        .get("block_size")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(16);
+
+                    // ── Parse new adapter_params fields ──
+
+                    // instance_id: auto-generated if not provided.
+                    let instance_id = params
+                        .get("instance_id")
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            let ts = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_micros();
+                            format!("{}-{:x}", node_id, ts)
+                        });
+
+                    // role: default "both", accepts "prefill"/"decode"/"both".
+                    let role_str = params
+                        .get("role")
+                        .map(|s| s.as_str())
+                        .unwrap_or("both");
+                    let role: i32 = match role_str.to_lowercase().as_str() {
+                        "prefill" => InstanceRole::Prefill as i32,
+                        "decode" => InstanceRole::Decode as i32,
+                        _ => InstanceRole::Both as i32,
+                    };
+
+                    // rpc_endpoint: default http://localhost:8000.
+                    let rpc_endpoint = params
+                        .get("rpc_endpoint")
+                        .map(|s| s.as_str())
+                        .unwrap_or("http://localhost:8000");
+
+                    tracing::info!(
+                        "Connecting to Director at {director_addr} (node={node_id}, tenant={tenant_id}, model={model_name})"
+                    );
+
+                    match DirectorIntegration::connect(
+                        director_addr,
+                        node_id,
+                        tenant_id,
+                        model_name,
+                        block_size,
+                    ) {
+                        Ok(di) => {
+                            let di = Arc::new(di);
+
+                            // ── Register this instance with the Director ──
+                            {
+                                let di_handle = di.handle();
+                                match di_handle.block_on(di.register(
+                                    &instance_id,
+                                    role,
+                                    rpc_endpoint,
+                                    0, // dp_rank
+                                )) {
+                                    Ok(resp) => {
+                                        if resp.accepted {
+                                            tracing::info!(
+                                                "Registered instance {instance_id} with Director (role={role_str})"
+                                            );
+                                        } else {
+                                            tracing::warn!(
+                                                "Director rejected registration for {instance_id}: {}",
+                                                resp.message
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "Failed to register with Director: {e}"
+                                        );
+                                    }
+                                }
+                            }
+
+                            // ── Spawn periodic heartbeat task ──
+                            {
+                                let hb_director = Arc::clone(&di);
+                                let hb_instance_id = instance_id.clone();
+                                let hb_shutdown = shutdown.clone();
+                                let hb_handle = di.handle().spawn(async move {
+                                    loop {
+                                        tokio::time::sleep(
+                                            std::time::Duration::from_secs(10),
+                                        )
+                                        .await;
+                                        if hb_shutdown.load(Ordering::Relaxed) {
+                                            break;
+                                        }
+                                        if let Err(e) =
+                                            hb_director.heartbeat(&hb_instance_id).await
+                                        {
+                                            tracing::warn!(
+                                                "Director heartbeat failed: {e}"
+                                            );
+                                        }
+                                    }
+                                });
+                                *hb.lock().unwrap() = Some(hb_handle);
+                            }
+
+                            (Some(di), instance_id, hb)
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to connect to Director: {e}");
+                            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                                format!("Director connection failed: {e}"),
+                            ));
+                        }
+                    }
+                } else {
+                    // No director_addr — generate placeholder instance_id.
+                    let fallback_id = format!(
+                        "lmcache-{}",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_micros()
+                    );
+                    (None, fallback_id, hb)
+                }
+            } else {
+                let fallback_id = format!(
+                    "lmcache-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_micros()
+                );
+                (None, fallback_id, hb)
+            }
+        };
+        #[cfg(not(feature = "director"))]
+        let _ = &adapter_params;
+
+        // LRU watermark: evict when more than half the extent region is used.
+        // Estimate based on batch_chunk_num_bytes * 10 / (avg key size ≈ 256).
+        let lru_watermark = (batch_chunk_num_bytes * 10 / 256).max(1000);
+        let lru = LruTracker::new(lru_watermark);
+
         Ok(RDMANativeConnector {
             table: Arc::new(Mutex::new(table)),
             large_objects: Arc::new(Mutex::new(large_objects)),
@@ -200,6 +405,17 @@ impl RDMANativeConnector {
             event_fd,
             _batch_chunk_num_bytes: batch_chunk_num_bytes,
             _num_workers: num_workers,
+            lru,
+            #[cfg(feature = "director")]
+            director,
+            #[cfg(feature = "director")]
+            instance_id,
+            #[cfg(feature = "director")]
+            heartbeat_handle,
+            #[cfg(feature = "director")]
+            pending_reports: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(feature = "director")]
+            pending_removes: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -260,49 +476,96 @@ impl RDMANativeConnector {
     fn submit_batch_set(&self, keys: Vec<String>, mvs: Vec<PyObject>) -> u64 {
         let future_id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
-        let results: Vec<bool> = {
+        // Record keys for Director reporting (if configured).
+        #[cfg(feature = "director")]
+        {
+            if self.director.is_some() {
+                self.pending_reports
+                    .lock()
+                    .unwrap()
+                    .insert(future_id, keys.clone());
+            }
+        }
+
+        // Collect insertion results in a for loop to avoid FnMut closure
+        // capture issues with MutexGuard drop-and-reacquire on eviction retry.
+        let mut results: Vec<bool> = Vec::with_capacity(keys.len());
+        {
             let mut table = self.table.lock().unwrap();
             let mut large_objects = self.large_objects.lock().unwrap();
+            let mut eviction_needed = false;
 
-            keys.iter()
-                .zip(mvs.iter())
-                .map(|(key, mv)| {
+            for (key, mv) in keys.iter().zip(mvs.iter()) {
+                let hk = hash_lmcache_key(key);
+
+                // Record LRU access for eviction tracking (T10-A).
+                self.lru.record_access(hk.hash);
+
+                // Extract raw bytes from the Python memoryview.
+                let data: Vec<u8> = Python::with_gil(|py| {
+                    mv.call_method0(py, "tobytes")
+                        .ok()
+                        .and_then(|b| b.extract::<Vec<u8>>(py).ok())
+                        .unwrap_or_default()
+                });
+
+                if data.is_empty() && !key.is_empty() {
+                    results.push(table.insert(&hk, &data, BucketMode::Inline).is_ok());
+                    continue;
+                }
+
+                let mode = if data.len() <= 32 {
+                    BucketMode::Inline
+                } else {
+                    BucketMode::Extent
+                };
+
+                let ok = match mode {
+                    BucketMode::Inline => {
+                        table.insert(&hk, &data, BucketMode::Inline).is_ok()
+                    }
+                    BucketMode::Extent => {
+                        if let Some(offset) = large_objects.allocate(&data) {
+                            table.insert_extent(&hk, offset, data.len() as u64).is_ok()
+                        } else {
+                            // T10-A: Allocation failed — flag for eviction retry.
+                            eviction_needed = true;
+                            false
+                        }
+                    }
+                };
+                results.push(ok);
+            }
+
+            // Retry failed extent allocations after LRU eviction.
+            if eviction_needed {
+                drop(table);
+                drop(large_objects);
+                self.evict_if_needed();
+                let mut table = self.table.lock().unwrap();
+                let mut large_objects = self.large_objects.lock().unwrap();
+                for (i, key) in keys.iter().enumerate() {
+                    if results[i] {
+                        continue; // already succeeded
+                    }
                     let hk = hash_lmcache_key(key);
-
-                    // Extract raw bytes from the Python memoryview.
                     let data: Vec<u8> = Python::with_gil(|py| {
-                        mv.call_method0(py, "tobytes")
-                            .ok()
-                            .and_then(|b| b.extract::<Vec<u8>>(py).ok())
+                        mvs.get(i)
+                            .and_then(|mv| {
+                                mv.call_method0(py, "tobytes")
+                                    .ok()
+                                    .and_then(|b| b.extract::<Vec<u8>>(py).ok())
+                            })
                             .unwrap_or_default()
                     });
-
-                    if data.is_empty() && !key.is_empty() {
-                        // Zero-length values are legal (marker-only entries).
-                        return table.insert(&hk, &data, BucketMode::Inline).is_ok();
-                    }
-
-                    let mode = if data.len() <= 32 {
-                        BucketMode::Inline
-                    } else {
-                        BucketMode::Extent
-                    };
-
-                    match mode {
-                        BucketMode::Inline => {
-                            table.insert(&hk, &data, BucketMode::Inline).is_ok()
-                        }
-                        BucketMode::Extent => {
-                            if let Some(offset) = large_objects.allocate(&data) {
-                                table.insert_extent(&hk, offset, data.len() as u64).is_ok()
-                            } else {
-                                false
-                            }
+                    if data.len() > 32 {
+                        if let Some(offset) = large_objects.allocate(&data) {
+                            results[i] = table.insert_extent(&hk, offset, data.len() as u64).is_ok();
                         }
                     }
-                })
-                .collect()
-        };
+                }
+            }
+        }
 
         self.push_completion(future_id, true, String::new(), Some(results));
         future_id
@@ -344,6 +607,17 @@ impl RDMANativeConnector {
     fn submit_batch_delete(&self, keys: Vec<String>) -> u64 {
         let future_id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
+        // Record keys for Director reporting (if configured).
+        #[cfg(feature = "director")]
+        {
+            if self.director.is_some() {
+                self.pending_removes
+                    .lock()
+                    .unwrap()
+                    .insert(future_id, keys.clone());
+            }
+        }
+
         let results: Vec<bool> = {
             let mut table = self.table.lock().unwrap();
             keys.iter()
@@ -374,9 +648,44 @@ impl RDMANativeConnector {
     /// The caller should invoke this whenever the `event_fd` becomes
     /// readable, and then call `eventfd_read` to clear the fd.
     fn drain_completions(&self) -> Vec<(u64, bool, String, Option<Vec<bool>>)> {
-        let mut comps = self.completions.lock().unwrap();
+        let comps: Vec<Completion> = {
+            let mut lock = self.completions.lock().unwrap();
+            lock.drain(..).collect()
+        };
+
+        // ── Director fire-and-forget reporting ──
+        // Only report for successful completions.  Spawn on the
+        // Director's dedicated tokio runtime so gRPC calls never
+        // block the completion drain path.
+        #[cfg(feature = "director")]
+        {
+            if let Some(ref director) = self.director {
+                let mut pending_reports = self.pending_reports.lock().unwrap();
+                let mut pending_removes = self.pending_removes.lock().unwrap();
+
+                for comp in &comps {
+                    if comp.ok {
+                        // Report store operations.
+                        if let Some(keys) = pending_reports.remove(&comp.future_id) {
+                            let director = Arc::clone(director);
+                            director.handle().spawn(async move {
+                                director.report_store(&keys).await;
+                            });
+                        }
+                        // Report remove operations.
+                        if let Some(keys) = pending_removes.remove(&comp.future_id) {
+                            let director = Arc::clone(director);
+                            director.handle().spawn(async move {
+                                director.report_remove(&keys).await;
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
         comps
-            .drain(..)
+            .into_iter()
             .map(|c| (c.future_id, c.ok, c.error, c.per_key_bools))
             .collect()
     }
@@ -395,6 +704,24 @@ impl RDMANativeConnector {
             return;
         }
 
+        // ── Director cleanup: abort heartbeat, then deregister ──
+        #[cfg(feature = "director")]
+        {
+            // Abort the heartbeat task so it doesn't race with deregister.
+            if let Ok(mut hb) = self.heartbeat_handle.lock() {
+                if let Some(handle) = hb.take() {
+                    handle.abort();
+                }
+            }
+
+            // Deregister from the Director (best-effort, don't block).
+            if let Some(ref di) = self.director {
+                let _ = di
+                    .handle()
+                    .block_on(di.deregister(&self.instance_id));
+            }
+        }
+
         // Signal workers to exit.
         self.shutdown.store(true, Ordering::SeqCst);
 
@@ -410,6 +737,44 @@ impl RDMANativeConnector {
 // ---------------------------------------------------------------------------
 
 impl RDMANativeConnector {
+    /// T10-A: Evict LRU entries when the large-object region is under
+    /// memory pressure.  Selects candidates from the LRU tracker and
+    /// deletes them from the cuckoo table.
+    fn evict_if_needed(&self) {
+        if !self.lru.needs_eviction() {
+            return;
+        }
+
+        // Select up to 10% of watermark entries for eviction.
+        let n = (self.lru.key_count() / 10).max(1) as usize;
+        let candidates = self.lru.select_eviction_candidates(n);
+
+        if candidates.is_empty() {
+            return;
+        }
+
+        let evicted_count = candidates.len() as u64;
+        let mut table = self.table.lock().unwrap();
+
+        for key_hash in &candidates {
+            // Build a minimal HashedKey from the hash for deletion.
+            let mut digest = [0u8; 16];
+            digest[0..8].copy_from_slice(&key_hash.to_le_bytes());
+            let hk = HashedKey {
+                hash: *key_hash,
+                digest,
+            };
+            table.delete(&hk);
+        }
+
+        self.lru.increment_evicted(evicted_count);
+        tracing::info!(
+            evicted = evicted_count,
+            remaining = self.lru.key_count(),
+            "LMCache LRU eviction completed"
+        );
+    }
+
     /// Push a completion and notify the eventfd.
     fn push_completion(
         &self,
@@ -447,9 +812,36 @@ impl Drop for RDMANativeConnector {
     fn drop(&mut self) {
         // Signal shutdown if not already closed.
         if !self.closed.swap(true, Ordering::SeqCst) {
+            // ── Director cleanup (if close() was skipped) ──
+            #[cfg(feature = "director")]
+            {
+                // Abort heartbeat task.
+                if let Ok(mut hb) = self.heartbeat_handle.lock() {
+                    if let Some(handle) = hb.take() {
+                        handle.abort();
+                    }
+                }
+                // Best-effort deregister.
+                if let Some(ref di) = self.director {
+                    let _ = di
+                        .handle()
+                        .block_on(di.deregister(&self.instance_id));
+                }
+            }
+
             self.shutdown.store(true, Ordering::SeqCst);
             unsafe {
                 libc::close(self.event_fd);
+            }
+        } else {
+            // close() was already called — ensure heartbeat handle is gone.
+            #[cfg(feature = "director")]
+            {
+                if let Ok(mut hb) = self.heartbeat_handle.lock() {
+                    if let Some(handle) = hb.take() {
+                        handle.abort();
+                    }
+                }
             }
         }
 
@@ -527,7 +919,7 @@ mod tests {
 
     #[test]
     fn test_new_connector() {
-        let connector = RDMANativeConnector::new("", "", 2, 16777216)
+        let connector = RDMANativeConnector::new("", "", 2, 16777216, None)
             .expect("creating connector should succeed");
         assert!(connector.event_fd() >= 0, "eventfd must be a valid fd");
         connector.close();
@@ -536,7 +928,7 @@ mod tests {
     #[test]
     fn test_batch_set_and_exists() {
         ensure_python();
-        let connector = RDMANativeConnector::new("", "", 2, 16777216)
+        let connector = RDMANativeConnector::new("", "", 2, 16777216, None)
             .expect("creating connector should succeed");
 
         let keys: Vec<String> = vec!["key_a".into(), "key_b".into(), "key_c".into()];
@@ -578,7 +970,7 @@ mod tests {
     #[test]
     fn test_batch_set_and_get_existence() {
         ensure_python();
-        let connector = RDMANativeConnector::new("", "", 2, 16777216)
+        let connector = RDMANativeConnector::new("", "", 2, 16777216, None)
             .expect("creating connector should succeed");
 
         let keys: Vec<String> = vec!["get_test_key".into()];
@@ -604,7 +996,7 @@ mod tests {
     #[test]
     fn test_batch_delete() {
         ensure_python();
-        let connector = RDMANativeConnector::new("", "", 2, 16777216)
+        let connector = RDMANativeConnector::new("", "", 2, 16777216, None)
             .expect("creating connector should succeed");
 
         let keys: Vec<String> = vec!["del_key".into()];
@@ -641,7 +1033,7 @@ mod tests {
 
     #[test]
     fn test_delete_nonexistent_key() {
-        let connector = RDMANativeConnector::new("", "", 2, 16777216)
+        let connector = RDMANativeConnector::new("", "", 2, 16777216, None)
             .expect("creating connector should succeed");
 
         let keys: Vec<String> = vec!["nonexistent".into()];
@@ -659,7 +1051,7 @@ mod tests {
 
     #[test]
     fn test_event_fd() {
-        let connector = RDMANativeConnector::new("", "", 2, 16777216)
+        let connector = RDMANativeConnector::new("", "", 2, 16777216, None)
             .expect("creating connector should succeed");
 
         let fd = connector.event_fd();
@@ -685,7 +1077,7 @@ mod tests {
 
     #[test]
     fn test_close_idempotent() {
-        let connector = RDMANativeConnector::new("", "", 2, 16777216)
+        let connector = RDMANativeConnector::new("", "", 2, 16777216, None)
             .expect("creating connector should succeed");
 
         connector.close();
@@ -696,7 +1088,7 @@ mod tests {
     #[test]
     fn test_large_value_extent_path() {
         ensure_python();
-        let connector = RDMANativeConnector::new("", "", 2, 1024 * 1024)
+        let connector = RDMANativeConnector::new("", "", 2, 1024 * 1024, None)
             .expect("creating connector should succeed");
 
         // Create a value larger than 32 bytes → should use Extent path.

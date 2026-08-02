@@ -36,6 +36,10 @@ pub enum RdmaError {
     #[error("not connected")]
     NotConnected,
 
+    /// Protocol version mismatch between client and server (not retriable, T10-E).
+    #[error("protocol version mismatch: {0}")]
+    ProtocolVersionMismatch(String),
+
     /// Internal error (not retriable)
     #[error("internal error: {0}")]
     Internal(String),

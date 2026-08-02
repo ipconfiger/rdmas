@@ -10,13 +10,15 @@ use ibverbs_sys::{ibv_access_flags, ibv_qp_type};
 use crate::control::client::ControlClient;
 use crate::error::RdmaError;
 use crate::rdma::qp::{ScatterGatherEntry, SendWorkRequest, SendWrOpcode};
+use crate::rdma::QpGuard;
 use crate::rdma::{CompletionQueue, Context, ProtectionDomain, QueuePair};
 use crate::runtime::poller::Poller;
 
-use super::Transport;
+use super::{ReconnectableTransport, Transport};
 
 pub struct RdmaTransport {
-    qp: Arc<QueuePair>,
+    /// Guarded QP with health checking before each post.
+    qp_guard: QpGuard,
     cq: Arc<CompletionQueue>,
     next_wr_id: AtomicU64,
     #[allow(dead_code)]
@@ -26,29 +28,17 @@ pub struct RdmaTransport {
     _pd: ProtectionDomain,
 }
 
-#[async_trait]
-impl Transport for RdmaTransport {
-    async fn connect(server_addr: &str) -> Result<Self, RdmaError> {
-        // 1. Connect via gRPC to discover server metadata
-        let mut control = ControlClient::connect(server_addr).await
-            .map_err(|e| RdmaError::Internal(format!("gRPC connect: {}", e)))?;
-        let _metadata = control.discover().await
-            .map_err(|e| RdmaError::Internal(format!("discover: {}", e)))?;
-
-        // 2. Open RDMA device
-        let context = Context::open()
-            .ok_or_else(|| RdmaError::Internal("No RDMA device found".into()))?;
-
-        // 3. Create PD, CQ, QP
-        let pd = ProtectionDomain::allocate(&context)?;
-        let cq = CompletionQueue::create(&context, 128, std::ptr::null_mut(), std::ptr::null_mut(), 0)?;
-        let cq = Arc::new(cq);
-
-        // 4. Create local convenience QP (self-loop for testing; real remote needs server QP info)
+impl RdmaTransport {
+    /// Internal helper: build a fully-initialized QP (INIT → RTR → RTS).
+    fn init_qp(
+        context: &Context,
+        pd: &ProtectionDomain,
+        cq: &Arc<CompletionQueue>,
+    ) -> Result<QueuePair, RdmaError> {
         let mut qp = QueuePair::create(
-            &pd,
-            &cq,
-            &cq,
+            pd,
+            cq,
+            cq,
             128,
             128,
             1,
@@ -70,14 +60,38 @@ impl Transport for RdmaTransport {
         qp.ready_to_receive(qp_num, port_attr.lid, gid, 1, 0)?;
         qp.ready_to_send(0)?;
 
-        let qp = Arc::new(qp);
+        Ok(qp)
+    }
+}
+
+#[async_trait]
+impl Transport for RdmaTransport {
+    async fn connect(server_addr: &str) -> Result<Self, RdmaError> {
+        // 1. Connect via gRPC to discover server metadata
+        let mut control = ControlClient::connect(server_addr).await
+            .map_err(|e| RdmaError::Internal(format!("gRPC connect: {}", e)))?;
+        let _metadata = control.discover().await
+            .map_err(|e| RdmaError::Internal(format!("discover: {}", e)))?;
+
+        // 2. Open RDMA device
+        let context = Context::open()
+            .ok_or_else(|| RdmaError::Internal("No RDMA device found".into()))?;
+
+        // 3. Create PD, CQ
+        let pd = ProtectionDomain::allocate(&context)?;
+        let cq = CompletionQueue::create(&context, 128, std::ptr::null_mut(), std::ptr::null_mut(), 0)?;
+        let cq = Arc::new(cq);
+
+        // 4. Create and initialize QP, wrap in QpGuard
+        let qp = Self::init_qp(&context, &pd, &cq)?;
+        let qp_guard = QpGuard::new(Arc::new(qp));
 
         // 5. Start poller
         let pending = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let (poller, _poller_pending) = Poller::spawn(cq.clone(), None);
 
         Ok(RdmaTransport {
-            qp,
+            qp_guard,
             cq,
             next_wr_id: AtomicU64::new(1),
             pending,
@@ -103,7 +117,7 @@ impl Transport for RdmaTransport {
             swap: None,
         };
 
-        self.qp.post_send(&mut wr)?;
+        self.qp_guard.post_send(&mut wr)?;
 
         let wcs = self.cq.poll(1)?;
         if wcs.is_empty() || !wcs[0].is_success() {
@@ -128,7 +142,7 @@ impl Transport for RdmaTransport {
             swap: None,
         };
 
-        self.qp.post_send(&mut wr)?;
+        self.qp_guard.post_send(&mut wr)?;
 
         let wcs = self.cq.poll(1)?;
         if wcs.is_empty() || !wcs[0].is_success() {
@@ -153,7 +167,7 @@ impl Transport for RdmaTransport {
             swap: Some(swap),
         };
 
-        self.qp.post_send(&mut wr)?;
+        self.qp_guard.post_send(&mut wr)?;
 
         let wcs = self.cq.poll(1)?;
         Ok(!wcs.is_empty() && wcs[0].is_success())
@@ -161,4 +175,14 @@ impl Transport for RdmaTransport {
 
     fn is_rdma(&self) -> bool { true }
     fn name(&self) -> &'static str { "RDMA" }
+}
+
+#[async_trait]
+impl ReconnectableTransport for RdmaTransport {
+    async fn reconnect(&self, server_addr: &str) -> Result<Box<dyn Transport>, RdmaError> {
+        // Reconnect: create a brand-new transport instance from scratch.
+        // The old QP will be dropped when the old RdmaTransport is dropped.
+        let transport = RdmaTransport::connect(server_addr).await?;
+        Ok(Box::new(transport))
+    }
 }

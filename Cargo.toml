@@ -12,6 +12,8 @@ license = "MIT OR Apache-2.0"
 default = []
 # Enable LMCache L2 connector (pyo3 cdylib, Wave 5)
 pyo3-connector = ["pyo3"]
+# Enable GPUDirect RDMA transport (T10-B)
+gdr = []
 
 [dependencies]
 # RDMA FFI bindings (T1-A) — own workspace crate, uses bindgen 0.70
@@ -46,8 +48,10 @@ rand = "0.8"
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 
 # gRPC control plane (T3-A, Wave 3)
-tonic = "0.12"
+# Feature `tls` enables rustls-based TLS for mTLS control-plane encryption (T11-A)
+tonic = { version = "0.12", features = ["tls"] }
 prost = "0.13"
+prost-types = "0.13"
 
 # Python bindings for LMCache connector (Wave 5)
 pyo3 = { version = "0.23", features = ["extension-module"], optional = true }
@@ -71,8 +75,16 @@ name = "engine_integration"
 path = "tests/engine/integration.rs"
 
 [[test]]
+name = "stress"
+path = "tests/stress/mod.rs"
+
+[[test]]
 name = "tcp_integration"
 path = "tests/transport/tcp_integration.rs"
+
+[[test]]
+name = "cross_wave"
+path = "tests/integration/cross_wave.rs"
 
 [[bench]]
 name = "engine"

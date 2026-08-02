@@ -21,3 +21,12 @@ pub mod bootstrap;
 
 /// Epoch-based garbage collector for extent region (Wave 4 T4-B)
 pub mod gc;
+
+/// LRU eviction tracker for cache management (T10-A)
+pub mod lru;
+
+/// Fixed-size chunk allocator for vLLM KV Block alignment (T9-C)
+pub mod slab;
+
+/// Memory watermark monitoring and alerting (T10-C)
+pub mod watermark;

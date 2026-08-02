@@ -1,8 +1,9 @@
-# Hidden files & directories (except git config and cargo config)
+# Hidden files & directories (except git config, cargo config, and GitHub CI)
 .*
 !.gitignore
 !.gitattributes
 !.cargo/
+!.github/
 
 # Rust
 target/

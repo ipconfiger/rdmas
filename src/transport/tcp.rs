@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 
 use crate::error::RdmaError;
 
-use super::Transport;
+use super::{ReconnectableTransport, Transport};
 
 const OP_READ: u8 = 0x01;
 const OP_WRITE: u8 = 0x02;
@@ -122,4 +122,13 @@ impl Transport for TcpTransport {
 
     fn is_rdma(&self) -> bool { false }
     fn name(&self) -> &'static str { "TCP" }
+}
+
+#[async_trait]
+impl ReconnectableTransport for TcpTransport {
+    async fn reconnect(&self, server_addr: &str) -> Result<Box<dyn Transport>, RdmaError> {
+        // Create a fresh TCP connection from scratch.
+        let transport = TcpTransport::connect(server_addr).await?;
+        Ok(Box::new(transport))
+    }
 }
