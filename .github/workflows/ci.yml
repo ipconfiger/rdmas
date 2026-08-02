@@ -31,6 +31,22 @@ jobs:
             libclang-dev \
             pkg-config
 
+      - name: Create rdmas-director stub (CI-only)
+        run: |
+          mkdir -p ../Rectifiers/crates/rdmas-director/src
+          cat > ../Rectifiers/crates/rdmas-director/Cargo.toml << 'TOML'
+          [package]
+          name = "rdmas-director"
+          version = "0.1.0"
+          edition = "2021"
+          [dependencies]
+          tonic = "0.12"
+          prost = "0.13"
+          TOML
+          cat > ../Rectifiers/crates/rdmas-director/src/lib.rs << 'RUST'
+          // Stub crate for CI — not compiled unless director feature is active.
+          RUST
+
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
