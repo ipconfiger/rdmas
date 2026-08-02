@@ -29,7 +29,8 @@ jobs:
             ibverbs-utils \
             clang \
             libclang-dev \
-            pkg-config
+            pkg-config \
+            protobuf-compiler
 
       - name: Create rdmas-director stub (CI-only)
         run: |
