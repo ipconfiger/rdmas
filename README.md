@@ -2,36 +2,38 @@
 
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-211%20passed-green.svg)]()
+[![Tests](https://img.shields.io/badge/tests-334%20passed-green.svg)]()
 
-基于**单边 RDMA**（One-Sided RDMA）的高性能分布式键值存储引擎。Server CPU 在数据面零参与，所有读写由 Client 通过 RDMA READ/WRITE/CAS 直接完成。可作为 [LMCache](https://github.com/LMCache/LMCache)（vLLM KV cache 库）的可配置 L2 存储引擎。
+> 📖 [中文版 (Chinese)](README.zh.md)
 
-## 设计目标
+A high-performance distributed key-value store built on **one-sided RDMA** (READ/WRITE/CAS). The server CPU is completely absent from the data plane — all reads and writes are performed directly by clients via RDMA verbs. Designed as a configurable L2 storage backend for [LMCache](https://github.com/LMCache/LMCache) (the vLLM KV cache library).
 
-| 维度 | 目标 | 实现方式 |
-|------|------|---------|
-| **吞吐** | ≥ 10M OPS | One-Sided RDMA, Server CPU 零参与 |
-| **读延迟** | P50 < 5μs, P99 < 10μs | Cuckoo Hashing (最多 2 次探测), Inline 小值 1 RTT |
-| **正确性** | 线性一致 | CAS + 版本号 + 租约过期接管 |
-| **可靠性** | 节点宕机可恢复 | 异步复制 + Epoch GC |
-| **安全性** | Safe Rust API | `unsafe` 收敛在 FFI 边界 |
-| **LMCache 集成** | 零拷贝 L2 后端 | PyO3 `native_plugin`, memoryview 直传 `void*` |
+## Design Goals
 
-## 设计哲学
+| Dimension | Target | Approach |
+|-----------|--------|----------|
+| **Throughput** | ≥ 10M OPS | One-Sided RDMA, server CPU zero participation |
+| **Read Latency** | P50 < 5μs, P99 < 10μs | Cuckoo Hashing (≤ 2 probes), Inline small values 1 RTT |
+| **Correctness** | Linearizability | CAS + version number + lease takeover |
+| **Reliability** | Recoverable from node failure | Async replication + Epoch GC |
+| **Safety** | Safe Rust API | `unsafe` contained at FFI boundary |
+| **LMCache Integration** | Zero-copy L2 backend | PyO3 `native_plugin`, memoryview → `void*` direct transfer |
 
-### 五条不可违背的原则
+## Design Philosophy
 
-1. **数据面零 CPU** — Server CPU 只做 MR 注册、GC 推进、控制面心跳。读写热路径不触碰 Server 内存，规避 CPU 缓存一致性深坑。
+### Five Inviolable Principles
 
-2. **静态内存布局** — 初始化期用 HugePages 一次性规划所有内存。数据面严禁 `malloc`。所有结构 `#[repr(C)]` + `Pod` + 64B 缓存行对齐。
+1. **Zero CPU on the data plane** — the server CPU only handles MR registration, GC advancement, and control-plane heartbeats. The read/write hot path never touches server memory, avoiding CPU cache coherence pitfalls.
 
-3. **确定性读 + 双模负载** — Cuckoo Hashing 保证最多 2 次探测。小 KV（≤32B）Inline 化单 RTT；大对象（LMCache KV cache 张量）走 Extent 单次 READ。
+2. **Static memory layout** — all memory is allocated upfront during initialization using HugePages. The data plane strictly forbids `malloc`. All structures use `#[repr(C)]` + `Pod` + 64B cache-line alignment.
 
-4. **`unsafe` 最小化** — FFI 边界内使用 `unsafe`，边界外只暴露 Safe API。`Drop` trait 管理 RDMA 资源生命周期。
+3. **Deterministic reads + dual-mode storage** — Cuckoo Hashing guarantees at most 2 probes. Small KV pairs (≤ 32 B) are stored inline for 1 RTT. Large objects (LMCache KV cache tensors) use the Extent region for a single READ.
 
-5. **引擎与集成解耦** — RDMA KV 引擎是通用核心，LMCache 适配是独立的 PyO3 crate。引擎不依赖 Python。
+4. **Minimal `unsafe`** — `unsafe` is confined within the FFI boundary. The public API exposes only safe Rust. The `Drop` trait manages RDMA resource lifetimes.
 
-### 架构
+5. **Engine decoupled from integration** — the RDMA KV engine is a general-purpose core. The LMCache adapter is a standalone PyO3 crate. The engine has no Python dependency.
+
+### Architecture
 
 ```
                                  RoCEv2 (25/100 Gbps)
@@ -51,16 +53,16 @@
 
 ---
 
-## 快速开始
+## Quick Start
 
-### 系统要求
+### System Requirements
 
 - Linux (x86_64), kernel 5.15+
-- RDMA 网卡 (Mellanox ConnectX-4+ 或 SoftRoCE)
+- RDMA NIC (Mellanox ConnectX-4+ or SoftRoCE)
 - Rust 1.75+
-- HugePages 配置 (Server 端)
+- HugePages configured (server side)
 
-### 安装依赖
+### Install Dependencies
 
 ```bash
 # Fedora
@@ -70,59 +72,59 @@ sudo dnf install -y rdma-core-devel libibverbs-utils clang glibc-headers
 sudo apt install -y rdma-core libibverbs-dev librdmacm-dev ibverbs-utils clang libclang-dev
 ```
 
-### 编译
+### Build
 
 ```bash
 git clone https://github.com/ipconfiger/rdmas.git
 cd rdmas
 cargo build --release
 cargo test --release
-# 预期: 211 tests passed, 0 failures
+# Expected: 334 tests passed, 0 failures
 ```
 
-### 配置 HugePages（Server 端）
+### Configure HugePages (Server Side)
 
 ```bash
-# 为 1M 桶哈希表 (64MB) + 大对象区预留
+# Reserve space for a 1M-bucket hash table (64 MB) + large object region
 echo 4096 | sudo tee /proc/sys/vm/nr_hugepages
-# 验证
+# Verify
 grep Huge /proc/meminfo
 ```
 
-### 配置 SoftRoCE（无硬件时开发测试用）
+### Configure SoftRoCE (Development Without Hardware)
 
 ```bash
 sudo modprobe rdma_rxe
 sudo rdma link add rxe0 type rxe netdev <eth0>
-ibv_devices  # 应列出 rxe0
+ibv_devices  # should list rxe0
 ```
 
-### 运行基准测试
+### Run Benchmarks
 
 ```bash
-# CAS 硬件验证 (最高优先级)
+# CAS hardware verification (highest priority)
 cargo bench --bench cas
 
-# 引擎性能
+# Engine performance
 cargo bench --bench engine
 ```
 
 ---
 
-## 与 LMCache 集成
+## LMCache Integration
 
-RDMAS 支持作为 [LMCache](https://github.com/LMCache/LMCache) 的可配置 L2 存储后端。LMCache 是配合 vLLM 的 LLM KV cache 库，存储的是模型 KV cache 张量的原始字节。
+RDMAS supports serving as a configurable L2 storage backend for [LMCache](https://github.com/LMCache/LMCache). LMCache is the LLM KV cache library that ships with vLLM, storing raw model KV cache tensors.
 
-### 编译 Connector
+### Build the Connector
 
 ```bash
-# 需要 Python 3.10+ 开发头文件
+# Requires Python 3.10+ development headers
 cd crates/lmcache-connector
 cargo build --release
-# 产物: target/release/liblmcache_rdma_connector.so
+# Output: target/release/liblmcache_rdma_connector.so
 ```
 
-### LMCache 配置
+### LMCache Configuration
 
 ```json
 --l2-adapter '{
@@ -146,67 +148,71 @@ cargo build --release
 }'
 ```
 
-### 数据流
+### Data Flow
 
 ```
 vLLM decode/prefill
   → LMCache L1 (CPU/GPU) miss
-  → L2 查询
+  → L2 lookup
   → RDMANativeConnector.submit_batch_get(keys, memoryviews)
-  → Rust worker: RDMA READ(Server Large Object Region)
-  → eventfd 通知
+  → Rust worker: RDMA READ (Server Large Object Region)
+  → eventfd notification
   → drain_completions()
-  → memoryview 被填入 KV cache 字节
-  → LMCache 返回 vLLM，零 CPU 拷贝
+  → memoryview filled with KV cache bytes
+  → LMCache returns to vLLM, zero CPU copy
 ```
 
-### Key 映射
+### Key Mapping
 
-LMCache 的 `ObjectKey` 序列化为字符串：
+LMCache `ObjectKey` is serialized as a string:
+
 ```
 <model_name>@<kv_rank:08x>@<object_group_id hex>@<chunk_hash hex>
-# 例: llama-7b@0000000c@0@a1b2c3d4
+# Example: llama-7b@0000000c@0@a1b2c3d4
 ```
 
-映射到 RDMAS 引擎：
-- 对该字符串求 64-bit XXH64 哈希 → Cuckoo 桶的 `key_hash`
-- 16B digest 存入 `key_or_digest` 用于冲突校验
-- Value 走 Extent 模式，单次 RDMA READ 取整块张量
+Mapped to the RDMAS engine:
+- Compute a 64-bit XXH64 hash of the string → Cuckoo bucket `key_hash`
+- Store a 16 B digest in `key_or_digest` for collision verification
+- Values use Extent mode, retrieved with a single RDMA READ for the full tensor
 
 ---
 
-## 项目结构
+## Project Structure
 
 ```
 rdmas/
 ├── crates/
-│   ├── ibverbs-sys/          # libibverbs FFI 绑定 (bindgen 0.70)
+│   ├── ibverbs-sys/          # libibverbs FFI bindings (bindgen 0.70)
 │   └── lmcache-connector/    # LMCache L2 PyO3 cdylib
 ├── src/
-│   ├── rdma/                 # Safe RDMA 封装 (Context/PD/MR/CQ/QP)
-│   ├── mem/                  # HugePages 分配器
-│   ├── runtime/              # Async RDMA 运行时 (busy-poll + oneshot)
+│   ├── rdma/                 # Safe RDMA wrappers (Context/PD/MR/CQ/QP)
+│   ├── mem/                  # HugePages allocator
+│   ├── runtime/              # Async RDMA runtime (busy-poll + oneshot)
 │   ├── engine/               # Cuckoo + Concurrency + Extent + GC
-│   ├── client/               # 分布式读/写/重试/会话
-│   └── control/              # gRPC 控制面 (Server/Client/Replication)
+│   ├── client/               # Distributed read/write/retry/session
+│   └── control/              # gRPC control plane (Server/Client/Replication)
 ├── benches/
-│   ├── cas/                  # RDMA CAS 硬件验证
-│   └── engine/               # 引擎性能基准
+│   ├── cas/                  # RDMA CAS hardware verification
+│   └── engine/               # Engine performance benchmarks
 ├── proto/                    # gRPC Protocol Buffers
-├── docs/                     # 设计文档 + 执行计划
-└── tests/                    # 集成测试
+├── docs/                     # Design documents + execution plans
+└── tests/                    # Integration tests
 ```
 
-## 文档
+## Documentation
 
-| 文档 | 说明 |
-|------|------|
-| [设计方案 v3](docs/Rust-RDMA.md) | 534 行完整技术设计，经 Oracle 交叉审计 |
-| [生产部署指南](docs/deployment.md) | 生产环境部署：硬件、HugePages、PFC/ECN、Docker、故障排查 |
-| [开发执行计划](docs/开发执行计划.md) | 6 波次轨道 + Gate 门禁，242 行 |
-| [Wave 7 硬件实测](docs/Wave7-硬件实测计划.md) | RDMA 实机验证 3 Phase 7 天计划 |
-| [进度报告](docs/进度报告.md) | 当前完成状态 + 性能基准数据 |
+| Document | Description |
+|----------|-------------|
+| [Design Spec v3](docs/Rust-RDMA.md) | 534-line complete technical design, cross-audited by Oracle |
+| [Production Deployment Guide](docs/deployment.md) | Production deployment: hardware, HugePages, PFC/ECN, Docker, troubleshooting |
+| [Development Execution Plan](docs/开发执行计划.md) | 6-wave track + gate checklist, 242 lines |
+| [Improvement Plan v2](docs/改进开发计划-Wave8-11-v2.md) | Waves 8–11 improvement roadmap (Oracle-reviewed), 15 tracks |
+| [Wave 7 Hardware Validation](docs/Wave7-硬件实测计划.md) | RDMA real-machine validation, 3-phase 7-day plan |
+| [Operations Manual](docs/operations.md) | Monitoring, alerting, troubleshooting, tuning, day-to-day ops |
+| [Extent Protocol Design](docs/extent-protocol.md) | CAS bump allocator distributed extent protocol |
+| [Security Design](docs/security.md) | Threat model, mTLS implementation, latency budget |
 
-## 许可证
+## License
 
 MIT OR Apache-2.0
