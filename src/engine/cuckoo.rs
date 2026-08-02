@@ -98,15 +98,7 @@ impl CuckooTable {
         // are valid. In production, this memory would come from a HugePage
         // that is already zeroed by the OS — eliminating the memset entirely
         // (benchmark: for 1M buckets / 64 MiB this saves the full zero pass).
-        let mut buckets: Vec<HashBucket> = Vec::with_capacity(count);
-        // SAFETY: HashBucket is Pod, all bit patterns are valid.
-        unsafe {
-            buckets.set_len(count);
-        }
-        // Zero-initialize for local-mode correctness.
-        // In production (HugePage-backed), this step is a no-op because the
-        // kernel pre-zeroes fresh huge pages.
-        buckets.fill(HashBucket::zeroed());
+        let buckets: Vec<HashBucket> = vec![HashBucket::zeroed(); count];
         Self {
             buckets,
             bucket_count,

@@ -43,6 +43,7 @@ impl CompletionQueue {
     /// * `context` - User context pointer passed to completion events (can be null).
     /// * `channel` - Completion channel for event-driven notification (can be null).
     /// * `comp_vector` - Completion vector for interrupt steering (typically 0).
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn create(
         ctx: &Context,
         cqe: u32,

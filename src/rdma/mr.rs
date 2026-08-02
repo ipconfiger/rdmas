@@ -69,6 +69,7 @@ impl MemoryRegion {
     /// # Errors
     ///
     /// Returns `RdmaError::Internal` if `ibv_reg_mr` returns null.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn register(
         pd: &ProtectionDomain,
         addr: *mut libc::c_void,
