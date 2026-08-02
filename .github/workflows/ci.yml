@@ -30,7 +30,8 @@ jobs:
             clang \
             libclang-dev \
             pkg-config \
-            protobuf-compiler
+            protobuf-compiler \
+            python3-dev
 
       - name: Create rdmas-director stub (CI-only)
         run: |
