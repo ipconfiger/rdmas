@@ -224,12 +224,8 @@ mod tests {
             .insert(&key, b"inline-data", BucketMode::Inline)
             .unwrap();
 
-        let result = OptimizedClientReader::get_fast(
-            &key,
-            table.buckets(),
-            None,
-            table.bucket_count(),
-        );
+        let result =
+            OptimizedClientReader::get_fast(&key, table.buckets(), None, table.bucket_count());
 
         assert!(result.is_some(), "key should be found");
         let (value, mode) = result.unwrap();
@@ -242,12 +238,8 @@ mod tests {
         let table = CuckooTable::new(64, 16);
         let key = make_key("missing");
 
-        let result = OptimizedClientReader::get_fast(
-            &key,
-            table.buckets(),
-            None,
-            table.bucket_count(),
-        );
+        let result =
+            OptimizedClientReader::get_fast(&key, table.buckets(), None, table.bucket_count());
 
         assert!(result.is_none(), "missing key should not be found");
     }
@@ -343,14 +335,9 @@ mod tests {
             (&key1, b"val-b"),
             (&key2, b"val-c"),
         ] {
-            let result = crate::client::read::ClientReader::get(
-                key,
-                &buckets,
-                None,
-                bucket_count,
-            )
-            .unwrap()
-            .expect("key should be found");
+            let result = crate::client::read::ClientReader::get(key, &buckets, None, bucket_count)
+                .unwrap()
+                .expect("key should be found");
             assert_eq!(&result.value[..expected.len()], *expected);
         }
     }
@@ -383,14 +370,10 @@ mod tests {
         assert!(builder.is_empty());
 
         // Read back via ClientReader + region.
-        let result = crate::client::read::ClientReader::get(
-            &key,
-            &buckets,
-            Some(&region),
-            bucket_count,
-        )
-        .unwrap()
-        .expect("extent key should be found");
+        let result =
+            crate::client::read::ClientReader::get(&key, &buckets, Some(&region), bucket_count)
+                .unwrap()
+                .expect("extent key should be found");
         assert_eq!(result.mode, BucketMode::Extent);
         assert_eq!(result.value, data);
     }

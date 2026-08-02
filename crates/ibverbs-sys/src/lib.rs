@@ -33,10 +33,7 @@ extern "C" {
         wc: *mut ibv_wc,
     ) -> ::libc::c_int;
 
-    pub fn ibv_req_notify_cq_wr(
-        cq: *mut ibv_cq,
-        solicited_only: ::libc::c_int,
-    ) -> ::libc::c_int;
+    pub fn ibv_req_notify_cq_wr(cq: *mut ibv_cq, solicited_only: ::libc::c_int) -> ::libc::c_int;
 
     pub fn ibv_query_port_attr(
         context: *mut ibv_context,

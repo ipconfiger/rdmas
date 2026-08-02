@@ -81,8 +81,7 @@ fn handle_bench_client(stream: &mut TcpStream, _buf: &mut [u8]) {
                 if stream.read_exact(&mut params).is_err() {
                     return;
                 }
-                let len =
-                    u32::from_le_bytes(params[12..16].try_into().unwrap()) as usize;
+                let len = u32::from_le_bytes(params[12..16].try_into().unwrap()) as usize;
 
                 // Response: req_id(8) + status(1) + data_len(4) + data
                 let mut resp = vec![0u8; 13 + len];
@@ -103,8 +102,7 @@ fn handle_bench_client(stream: &mut TcpStream, _buf: &mut [u8]) {
                 if stream.read_exact(&mut params).is_err() {
                     return;
                 }
-                let len =
-                    u32::from_le_bytes(params[12..16].try_into().unwrap()) as usize;
+                let len = u32::from_le_bytes(params[12..16].try_into().unwrap()) as usize;
 
                 let mut data = vec![0u8; len];
                 if stream.read_exact(&mut data).is_err() {
@@ -132,7 +130,10 @@ fn handle_bench_client(stream: &mut TcpStream, _buf: &mut [u8]) {
 
 fn bench_tcp_ops(c: &mut Criterion) {
     let (addr, _running) = start_mock_server();
-    let rt = tokio::runtime::Builder::new_current_thread().enable_io().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .unwrap();
 
     let transport = rt.block_on(async { TcpTransport::connect(&addr).await.unwrap() });
 

@@ -18,23 +18,23 @@
 
 /// RDMA device context (ibv_context wrapper)
 pub mod context;
-/// Protection domain (ibv_pd wrapper)
-pub mod pd;
+/// Completion queue — polling for completed work requests
+pub mod cq;
 /// Memory region (ibv_mr wrapper) — crucial for zero-copy RDMA
 pub mod mr;
+/// Protection domain (ibv_pd wrapper)
+pub mod pd;
 /// Queue pair — the workhorse for posting RDMA operations
 pub mod qp;
 /// QP error state recovery — QpGuard health-checking wrapper
 pub mod qp_recovery;
-/// Completion queue — polling for completed work requests
-pub mod cq;
 
 // Re-export the key types for convenience
 pub use context::Context;
 pub use context::DeviceAttr;
 pub use context::PortAttr;
-pub use pd::ProtectionDomain;
-pub use mr::MemoryRegion;
 pub use cq::{CompletionQueue, CqEventChannel, WorkCompletion};
+pub use mr::MemoryRegion;
+pub use pd::ProtectionDomain;
 pub use qp::{QueuePair, RecvWorkRequest, ScatterGatherEntry, SendWorkRequest, SendWrOpcode};
 pub use qp_recovery::QpGuard;

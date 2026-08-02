@@ -33,9 +33,7 @@ fn main() {
         builder = builder.clang_arg(format!("-I{}", path.display()));
     }
 
-    let bindings = builder
-        .generate()
-        .expect("Failed to generate bindings");
+    let bindings = builder.generate().expect("Failed to generate bindings");
 
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
     bindings

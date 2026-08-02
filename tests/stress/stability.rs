@@ -102,7 +102,10 @@ fn test_stability_continuous_operations() {
         total_ops as f64 / elapsed,
     );
 
-    assert!(total_ops > 0, "No operations completed — test is too short or deadlocked");
+    assert!(
+        total_ops > 0,
+        "No operations completed — test is too short or deadlocked"
+    );
     // Some TableFull errors are expected as the table approaches capacity.
     // We just verify nothing panicked.
 }

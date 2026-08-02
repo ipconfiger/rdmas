@@ -29,7 +29,8 @@ impl AccessFlags {
     pub const REMOTE_READ: u32 = ibverbs_sys::ibv_access_flags::IBV_ACCESS_REMOTE_READ as u32;
     pub const REMOTE_ATOMIC: u32 = ibverbs_sys::ibv_access_flags::IBV_ACCESS_REMOTE_ATOMIC as u32;
     pub const MW_BIND: u32 = ibverbs_sys::ibv_access_flags::IBV_ACCESS_MW_BIND as u32;
-    pub const RELAXED_ORDERING: u32 = ibverbs_sys::ibv_access_flags::IBV_ACCESS_RELAXED_ORDERING as u32;
+    pub const RELAXED_ORDERING: u32 =
+        ibverbs_sys::ibv_access_flags::IBV_ACCESS_RELAXED_ORDERING as u32;
     pub const NONE: u32 = 0;
 }
 
@@ -74,14 +75,7 @@ impl MemoryRegion {
         length: usize,
         access: i32,
     ) -> Result<Self, RdmaError> {
-        let mr_ptr = unsafe {
-            ibverbs_sys::ibv_reg_mr(
-                pd.as_ptr(),
-                addr,
-                length,
-                access,
-            )
-        };
+        let mr_ptr = unsafe { ibverbs_sys::ibv_reg_mr(pd.as_ptr(), addr, length, access) };
 
         let mr = NonNull::new(mr_ptr).ok_or_else(|| {
             RdmaError::Internal(format!(

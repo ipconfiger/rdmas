@@ -260,7 +260,13 @@ impl ClientWriter {
 
                     // Phase 2: CAS bump_offset to reserve space.
                     let cas_ok = transport
-                        .cas(old_offset, new_offset, lkey, free_list_vaddr, free_list_rkey)
+                        .cas(
+                            old_offset,
+                            new_offset,
+                            lkey,
+                            free_list_vaddr,
+                            free_list_rkey,
+                        )
                         .await?;
                     if !cas_ok {
                         return Err(RdmaError::CasFailed);
@@ -301,7 +307,13 @@ impl ClientWriter {
             // CAS the lock_version to claim the slot.
             let old_lv = bucket.lock_version;
             let cas_ok = transport
-                .cas(old_lv, new_bucket.lock_version, lkey, remote_addr, remote_rkey)
+                .cas(
+                    old_lv,
+                    new_bucket.lock_version,
+                    lkey,
+                    remote_addr,
+                    remote_rkey,
+                )
                 .await?;
 
             if cas_ok {
@@ -462,7 +474,9 @@ impl ClientWriter {
                     large_objects.as_deref_mut(),
                     alt_idx,
                 )?;
-                return Ok(WriteResult::Inserted { bucket_idx: alt_idx });
+                return Ok(WriteResult::Inserted {
+                    bucket_idx: alt_idx,
+                });
             }
 
             // 5. Cascade: the displaced occupant becomes the next key to
@@ -508,9 +522,9 @@ impl ClientWriter {
             }
             BucketMode::Extent => {
                 if let Some(region) = large_objects {
-                    let offset = region.allocate(value).ok_or_else(|| {
-                        RdmaError::Internal("extent allocation failed".into())
-                    })?;
+                    let offset = region
+                        .allocate(value)
+                        .ok_or_else(|| RdmaError::Internal("extent allocation failed".into()))?;
                     bucket.set_extent_ref(offset, value.len() as u64);
                 } else {
                     return Err(RdmaError::Internal(
@@ -558,15 +572,8 @@ mod tests {
         let key = make_key(0xABCD, 1);
         let value = b"hello world";
 
-        let result = ClientWriter::insert(
-            &key,
-            value,
-            BucketMode::Inline,
-            &mut buckets,
-            None,
-            8,
-        )
-        .expect("insert should not error");
+        let result = ClientWriter::insert(&key, value, BucketMode::Inline, &mut buckets, None, 8)
+            .expect("insert should not error");
 
         match result {
             WriteResult::Inserted { bucket_idx } => {
@@ -608,13 +615,23 @@ mod tests {
 
         // First two should insert directly.
         let r1 = ClientWriter::insert(
-            &k1, b"one", BucketMode::Inline, &mut buckets, None, bucket_count,
+            &k1,
+            b"one",
+            BucketMode::Inline,
+            &mut buckets,
+            None,
+            bucket_count,
         )
         .unwrap();
         assert!(matches!(r1, WriteResult::Inserted { .. }));
 
         let r2 = ClientWriter::insert(
-            &k2, b"two", BucketMode::Inline, &mut buckets, None, bucket_count,
+            &k2,
+            b"two",
+            BucketMode::Inline,
+            &mut buckets,
+            None,
+            bucket_count,
         )
         .unwrap();
         assert!(matches!(r2, WriteResult::Inserted { .. }));
@@ -622,7 +639,12 @@ mod tests {
         // The third insert may trigger a kick chain or return TableFull on a
         // tiny table. Either outcome is acceptable; we just validate no panic.
         match ClientWriter::insert(
-            &k3, b"three", BucketMode::Inline, &mut buckets, None, bucket_count,
+            &k3,
+            b"three",
+            BucketMode::Inline,
+            &mut buckets,
+            None,
+            bucket_count,
         ) {
             Ok(WriteResult::Inserted { .. }) | Ok(WriteResult::TableFull) => {}
             Err(e) => panic!("unexpected error: {e}"),
@@ -630,7 +652,9 @@ mod tests {
 
         // k1 and k2 should still be findable: scan buckets to verify.
         let find_key = |buckets: &[HashBucket], hash: u64, digest: &[u8; 16]| -> bool {
-            buckets.iter().any(|b| b.matches_key(hash, digest) && !b.is_tombstone())
+            buckets
+                .iter()
+                .any(|b| b.matches_key(hash, digest) && !b.is_tombstone())
         };
 
         // Recompute k1 digest.
@@ -683,7 +707,10 @@ mod tests {
             }
         }
 
-        assert!(hit_table_full, "should eventually return TableFull on a tiny table");
+        assert!(
+            hit_table_full,
+            "should eventually return TableFull on a tiny table"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -788,15 +815,8 @@ mod tests {
         let mut buckets = make_buckets(8);
         let key = make_key(0x9999, 99);
 
-        let result = ClientWriter::insert(
-            &key,
-            b"",
-            BucketMode::Inline,
-            &mut buckets,
-            None,
-            8,
-        )
-        .expect("empty value insert should not error");
+        let result = ClientWriter::insert(&key, b"", BucketMode::Inline, &mut buckets, None, 8)
+            .expect("empty value insert should not error");
 
         match result {
             WriteResult::Inserted { bucket_idx } => {
@@ -842,11 +862,15 @@ mod tests {
         )
         .expect("insert into tombstone should not error");
 
-        assert!(matches!(result, WriteResult::Inserted { .. }),
-            "tombstone slot should be reusable");
+        assert!(
+            matches!(result, WriteResult::Inserted { .. }),
+            "tombstone slot should be reusable"
+        );
 
         // The key should now reside in the table.
-        let found = buckets.iter().any(|b| b.matches_key(8, &[0x22; 16]) && !b.is_tombstone());
+        let found = buckets
+            .iter()
+            .any(|b| b.matches_key(8, &[0x22; 16]) && !b.is_tombstone());
         assert!(found, "key should be in the table after tombstone reuse");
     }
 
@@ -868,7 +892,10 @@ mod tests {
             8,
         );
 
-        assert!(result.is_err(), "Extent mode without a region should be an error");
+        assert!(
+            result.is_err(),
+            "Extent mode without a region should be an error"
+        );
         if let Err(RdmaError::Internal(msg)) = result {
             assert!(msg.contains("Extent"), "error should mention Extent: {msg}");
         } else if let Err(e) = result {

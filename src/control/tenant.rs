@@ -1,7 +1,7 @@
 //! Multi-tenant namespace isolation (T11-C).
 //!
-//! Provides namespace-level key isolation by mixing a tenant_id 
-//! into the XXH64 hash seed. Different tenants' keys map to 
+//! Provides namespace-level key isolation by mixing a tenant_id
+//! into the XXH64 hash seed. Different tenants' keys map to
 //! different hash table slots with high probability.
 //!
 //! # Design
@@ -54,7 +54,7 @@ impl TenantNamespace {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_different_tenants_produce_different_hashes() {
         let t1 = TenantNamespace::new(1);

@@ -62,9 +62,7 @@ impl TlsConfig {
         let ca = Certificate::from_pem(&self.ca_cert_pem);
         let identity = Identity::from_pem(&self.client_cert_pem, &self.client_key_pem);
 
-        let tls_config = ClientTlsConfig::new()
-            .ca_certificate(ca)
-            .identity(identity);
+        let tls_config = ClientTlsConfig::new().ca_certificate(ca).identity(identity);
 
         Ok(tls_config)
     }
@@ -120,17 +118,15 @@ impl ClientSession {
     ///
     /// RDMA is attempted first. If it fails (no hardware, connection refused,
     /// etc.), the session falls back to TCP on port `server_port + 1`.
-    pub async fn connect(
-        server_addr: &str,
-        client_id: u64,
-    ) -> Result<Self, ClientSessionError> {
+    pub async fn connect(server_addr: &str, client_id: u64) -> Result<Self, ClientSessionError> {
         // ---- Step 1: Control plane ----
         let mut control = ControlClient::connect(server_addr).await?;
 
         // ---- Step 2: Version negotiation (T10-E) ----
-        let version = control.get_version().await.map_err(|e| {
-            ClientSessionError::Grpc(e)
-        })?;
+        let version = control
+            .get_version()
+            .await
+            .map_err(|e| ClientSessionError::Grpc(e))?;
         if version.service_version < MIN_COMPATIBLE_VERSION {
             return Err(ClientSessionError::VersionMismatch(format!(
                 "Server version {} is incompatible; minimum required is {}",
@@ -139,16 +135,16 @@ impl ClientSession {
         }
 
         // ---- Step 3: Discover metadata ----
-        let metadata = control.discover().await.map_err(|e| {
-            ClientSessionError::Grpc(e)
-        })?;
+        let metadata = control
+            .discover()
+            .await
+            .map_err(|e| ClientSessionError::Grpc(e))?;
 
         // ---- Step 4: Auto-detect transport ----
         let transport = Self::create_transport_inner(server_addr).await?;
 
         // ---- Step 5: Heartbeat interval ----
-        let heartbeat_interval =
-            Duration::from_millis(DEFAULT_HEARTBEAT_INTERVAL_MS);
+        let heartbeat_interval = Duration::from_millis(DEFAULT_HEARTBEAT_INTERVAL_MS);
 
         Ok(Self {
             client_id,
@@ -180,17 +176,15 @@ impl ClientSession {
     ) -> Result<Self, ClientSessionError> {
         // ---- Step 1: Control plane over mTLS ----
         let client_tls = tls_config.to_client_tls_config().map_err(|e| {
-            ClientSessionError::Tls(format!(
-                "Failed to build client TLS config: {}",
-                e
-            ))
+            ClientSessionError::Tls(format!("Failed to build client TLS config: {}", e))
         })?;
         let mut control = ControlClient::connect_tls(server_addr, client_tls).await?;
 
         // ---- Step 2: Version negotiation (T10-E) ----
-        let version = control.get_version().await.map_err(|e| {
-            ClientSessionError::Grpc(e)
-        })?;
+        let version = control
+            .get_version()
+            .await
+            .map_err(|e| ClientSessionError::Grpc(e))?;
         if version.service_version < MIN_COMPATIBLE_VERSION {
             return Err(ClientSessionError::VersionMismatch(format!(
                 "Server version {} is incompatible; minimum required is {}",
@@ -199,16 +193,16 @@ impl ClientSession {
         }
 
         // ---- Step 3: Discover metadata ----
-        let metadata = control.discover().await.map_err(|e| {
-            ClientSessionError::Grpc(e)
-        })?;
+        let metadata = control
+            .discover()
+            .await
+            .map_err(|e| ClientSessionError::Grpc(e))?;
 
         // ---- Step 4: Auto-detect transport (RDMA or TCP, unencrypted) ----
         let transport = Self::create_transport_inner(server_addr).await?;
 
         // ---- Step 5: Heartbeat interval ----
-        let heartbeat_interval =
-            Duration::from_millis(DEFAULT_HEARTBEAT_INTERVAL_MS);
+        let heartbeat_interval = Duration::from_millis(DEFAULT_HEARTBEAT_INTERVAL_MS);
 
         Ok(Self {
             client_id,
@@ -234,14 +228,9 @@ impl ClientSession {
                 tracing::warn!("RDMA unavailable ({}), falling back to TCP", e);
                 // TCP port: use the same host as the gRPC server, but port + 1
                 let tcp_addr = server_addr.replace(":9400", ":9401");
-                let tcp = TcpTransport::connect(&tcp_addr)
-                    .await
-                    .map_err(|e| {
-                        ClientSessionError::Rdma(RdmaError::Internal(format!(
-                            "TCP fallback: {}",
-                            e
-                        )))
-                    })?;
+                let tcp = TcpTransport::connect(&tcp_addr).await.map_err(|e| {
+                    ClientSessionError::Rdma(RdmaError::Internal(format!("TCP fallback: {}", e)))
+                })?;
                 Ok(Box::new(tcp))
             }
         }
@@ -348,9 +337,11 @@ impl ClientSession {
     ///
     /// Useful when the server rotates memory regions (generation bump).
     pub async fn refresh_metadata(&mut self) -> Result<&ServerMetadata, ClientSessionError> {
-        let metadata = self.control.discover().await.map_err(|e| {
-            ClientSessionError::Grpc(e)
-        })?;
+        let metadata = self
+            .control
+            .discover()
+            .await
+            .map_err(|e| ClientSessionError::Grpc(e))?;
         self.metadata = metadata;
         Ok(&self.metadata)
     }
@@ -389,9 +380,11 @@ impl ClientSession {
         self.invalidate_mr_metadata();
 
         // Step 2: Re-discover server metadata
-        let metadata = self.control.discover().await.map_err(|e| {
-            ClientSessionError::Grpc(e)
-        })?;
+        let metadata = self
+            .control
+            .discover()
+            .await
+            .map_err(|e| ClientSessionError::Grpc(e))?;
 
         // Step 3: Reconnect transport with new metadata
         self.transport = Self::create_transport_inner(&self.server_addr).await?;
@@ -399,7 +392,10 @@ impl ClientSession {
         // Step 4: Update local state
         self.metadata = metadata;
 
-        tracing::info!("Reconnect complete, generation={}", self.metadata.generation);
+        tracing::info!(
+            "Reconnect complete, generation={}",
+            self.metadata.generation
+        );
         Ok(())
     }
 }
@@ -606,7 +602,10 @@ mod tests {
         };
 
         // If reconnect flag is set, we should reconnect.
-        assert!(response.reconnect, "reconnect flag should trigger reconnect");
+        assert!(
+            response.reconnect,
+            "reconnect flag should trigger reconnect"
+        );
 
         // If generation differs from metadata, should also reconnect.
         let response_stale = HeartbeatResponse {
@@ -633,7 +632,10 @@ mod tests {
         };
 
         let needs = response.reconnect || response.generation != metadata.generation;
-        assert!(!needs, "same generation and no reconnect flag should not trigger reconnect");
+        assert!(
+            !needs,
+            "same generation and no reconnect flag should not trigger reconnect"
+        );
     }
 
     #[test]

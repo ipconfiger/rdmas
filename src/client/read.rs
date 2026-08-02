@@ -175,14 +175,8 @@ impl ClientReader {
 
         if !bucket.is_locked() && bucket.matches_key(key.hash, &key.digest) {
             return Ok(Some(
-                Self::extract_value(
-                    bucket,
-                    transport,
-                    large_obj_vaddr,
-                    large_obj_rkey,
-                    lkey,
-                )
-                .await?,
+                Self::extract_value(bucket, transport, large_obj_vaddr, large_obj_rkey, lkey)
+                    .await?,
             ));
         }
 
@@ -199,14 +193,8 @@ impl ClientReader {
 
         if !bucket.is_locked() && bucket.matches_key(key.hash, &key.digest) {
             return Ok(Some(
-                Self::extract_value(
-                    bucket,
-                    transport,
-                    large_obj_vaddr,
-                    large_obj_rkey,
-                    lkey,
-                )
-                .await?,
+                Self::extract_value(bucket, transport, large_obj_vaddr, large_obj_rkey, lkey)
+                    .await?,
             ));
         }
 
@@ -231,12 +219,7 @@ impl ClientReader {
             let (offset, length) = bucket.extent_ref();
             let mut buf = vec![0u8; length as usize];
             transport
-                .read(
-                    &mut buf,
-                    lkey,
-                    large_obj_vaddr + offset,
-                    large_obj_rkey,
-                )
+                .read(&mut buf, lkey, large_obj_vaddr + offset, large_obj_rkey)
                 .await?;
             Ok(ReadResult {
                 value: buf,
@@ -348,18 +331,11 @@ mod tests {
     fn test_read_inline_single_key() {
         let mut table = CuckooTable::new(64, 16);
         let key = make_key("hello");
-        table
-            .insert(&key, b"world", BucketMode::Inline)
-            .unwrap();
+        table.insert(&key, b"world", BucketMode::Inline).unwrap();
 
-        let result = ClientReader::get(
-            &key,
-            table.buckets(),
-            None,
-            table.bucket_count(),
-        )
-        .unwrap()
-        .expect("key should be found");
+        let result = ClientReader::get(&key, table.buckets(), None, table.bucket_count())
+            .unwrap()
+            .expect("key should be found");
 
         assert_eq!(result.mode, BucketMode::Inline);
         // "world" padded to 32 bytes
@@ -428,13 +404,8 @@ mod tests {
 
         table.insert(&present, b"data", BucketMode::Inline).unwrap();
 
-        let result = ClientReader::get(
-            &missing,
-            table.buckets(),
-            None,
-            table.bucket_count(),
-        )
-        .unwrap();
+        let result =
+            ClientReader::get(&missing, table.buckets(), None, table.bucket_count()).unwrap();
 
         assert!(result.is_none(), "missing key should not be found");
     }
@@ -457,7 +428,10 @@ mod tests {
         assert!(table.delete(&key));
 
         let result = ClientReader::get(&key, table.buckets(), None, table.bucket_count()).unwrap();
-        assert!(result.is_none(), "deleted (tombstone) key should not be found");
+        assert!(
+            result.is_none(),
+            "deleted (tombstone) key should not be found"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -471,19 +445,16 @@ mod tests {
         let key = make_key("large-value");
         let data = b"This is a large value stored in extent mode!".to_vec();
 
-        let offset = region.allocate(&data).expect("extent allocation should succeed");
+        let offset = region
+            .allocate(&data)
+            .expect("extent allocation should succeed");
         table
             .insert_extent(&key, offset, data.len() as u64)
             .unwrap();
 
-        let result = ClientReader::get(
-            &key,
-            table.buckets(),
-            Some(&region),
-            table.bucket_count(),
-        )
-        .unwrap()
-        .expect("extent key should be found");
+        let result = ClientReader::get(&key, table.buckets(), Some(&region), table.bucket_count())
+            .unwrap()
+            .expect("extent key should be found");
 
         assert_eq!(result.mode, BucketMode::Extent);
         assert_eq!(result.value, data);
@@ -505,19 +476,17 @@ mod tests {
         for (name, data) in &entries {
             let key = make_key(name);
             let offset = region.allocate(data).unwrap();
-            table.insert_extent(&key, offset, data.len() as u64).unwrap();
+            table
+                .insert_extent(&key, offset, data.len() as u64)
+                .unwrap();
             expected.push((key, data.clone(), offset));
         }
 
         for (key, data, _offset) in &expected {
-            let result = ClientReader::get(
-                key,
-                table.buckets(),
-                Some(&region),
-                table.bucket_count(),
-            )
-            .unwrap()
-            .expect("extent key should be found");
+            let result =
+                ClientReader::get(key, table.buckets(), Some(&region), table.bucket_count())
+                    .unwrap()
+                    .expect("extent key should be found");
             assert_eq!(result.mode, BucketMode::Extent);
             assert_eq!(&result.value, data);
         }
@@ -542,19 +511,16 @@ mod tests {
 
         let data = b"valid data".to_vec();
         let offset = region.allocate(&data).unwrap();
-        table.insert_extent(&key, offset, data.len() as u64).unwrap();
+        table
+            .insert_extent(&key, offset, data.len() as u64)
+            .unwrap();
 
         // Verify the extent is readable through the region.
         assert!(region.read(offset).is_some(), "extent should be readable");
 
-        let result = ClientReader::get(
-            &key,
-            table.buckets(),
-            Some(&region),
-            table.bucket_count(),
-        )
-        .unwrap()
-        .expect("key should be found with correct extent data");
+        let result = ClientReader::get(&key, table.buckets(), Some(&region), table.bucket_count())
+            .unwrap()
+            .expect("key should be found with correct extent data");
 
         assert_eq!(result.value, data);
     }
@@ -569,13 +535,8 @@ mod tests {
         table.insert_extent(&key, offset, 11).unwrap();
         table.delete(&key);
 
-        let result = ClientReader::get(
-            &key,
-            table.buckets(),
-            Some(&region),
-            table.bucket_count(),
-        )
-        .unwrap();
+        let result =
+            ClientReader::get(&key, table.buckets(), Some(&region), table.bucket_count()).unwrap();
         assert!(result.is_none(), "deleted extent key should not be found");
     }
 
@@ -595,13 +556,7 @@ mod tests {
         let h1 = (key.hash % table.bucket_count()) as usize;
         table.bucket_mut(h1 as u64).lock_version = 0x01; // lock bit set
 
-        let result = ClientReader::get(
-            &key,
-            table.buckets(),
-            None,
-            table.bucket_count(),
-        )
-        .unwrap();
+        let result = ClientReader::get(&key, table.buckets(), None, table.bucket_count()).unwrap();
 
         // If h2 also doesn't have the key (or is also locked), return None.
         // Since the key was only inserted once (cuckoo puts it at h1 or h2),
@@ -709,9 +664,7 @@ mod tests {
         for (i, k) in extent_keys.iter().enumerate() {
             let val = vec![(i as u8).wrapping_mul(7); 200 + i * 50];
             let offset = region.allocate(&val).unwrap();
-            table
-                .insert_extent(k, offset, val.len() as u64)
-                .unwrap();
+            table.insert_extent(k, offset, val.len() as u64).unwrap();
         }
 
         // Read back inline keys.
@@ -813,14 +766,9 @@ mod tests {
             .insert_extent(&key, offset, ext_data.len() as u64)
             .unwrap();
 
-        let result = ClientReader::get(
-            &key,
-            table.buckets(),
-            Some(&region),
-            table.bucket_count(),
-        )
-        .unwrap()
-        .expect("should read extent value after mode switch");
+        let result = ClientReader::get(&key, table.buckets(), Some(&region), table.bucket_count())
+            .unwrap()
+            .expect("should read extent value after mode switch");
 
         assert_eq!(result.mode, BucketMode::Extent);
         assert_eq!(result.value, ext_data);
@@ -873,8 +821,7 @@ mod tests {
         assert!(table.delete(&key));
 
         // Read after delete.
-        let result2 =
-            ClientReader::get(&key, table.buckets(), None, table.bucket_count()).unwrap();
+        let result2 = ClientReader::get(&key, table.buckets(), None, table.bucket_count()).unwrap();
         assert!(result2.is_none());
     }
 
@@ -887,19 +834,12 @@ mod tests {
 
         // Write.
         let offset = region.allocate(&val).unwrap();
-        table
-            .insert_extent(&key, offset, val.len() as u64)
-            .unwrap();
+        table.insert_extent(&key, offset, val.len() as u64).unwrap();
 
         // Read via ClientReader.
-        let result = ClientReader::get(
-            &key,
-            table.buckets(),
-            Some(&region),
-            table.bucket_count(),
-        )
-        .unwrap()
-        .expect("should read back extent value");
+        let result = ClientReader::get(&key, table.buckets(), Some(&region), table.bucket_count())
+            .unwrap()
+            .expect("should read back extent value");
 
         assert_eq!(result.mode, BucketMode::Extent);
         assert_eq!(result.value, val);
@@ -908,13 +848,8 @@ mod tests {
         assert!(table.delete(&key));
 
         // Read after delete.
-        let result2 = ClientReader::get(
-            &key,
-            table.buckets(),
-            Some(&region),
-            table.bucket_count(),
-        )
-        .unwrap();
+        let result2 =
+            ClientReader::get(&key, table.buckets(), Some(&region), table.bucket_count()).unwrap();
         assert!(result2.is_none());
     }
 }

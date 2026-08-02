@@ -20,8 +20,8 @@
 //!    - Else: repeat with the alternate's occupant.
 //! 5. MAX_KICK reached → return `TableFull` (no partial writes — local mode).
 
-use bytemuck::Zeroable;
 use crate::engine::layout::*;
+use bytemuck::Zeroable;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -100,12 +100,18 @@ impl CuckooTable {
         // (benchmark: for 1M buckets / 64 MiB this saves the full zero pass).
         let mut buckets: Vec<HashBucket> = Vec::with_capacity(count);
         // SAFETY: HashBucket is Pod, all bit patterns are valid.
-        unsafe { buckets.set_len(count); }
+        unsafe {
+            buckets.set_len(count);
+        }
         // Zero-initialize for local-mode correctness.
         // In production (HugePage-backed), this step is a no-op because the
         // kernel pre-zeroes fresh huge pages.
         buckets.fill(HashBucket::zeroed());
-        Self { buckets, bucket_count, max_kick }
+        Self {
+            buckets,
+            bucket_count,
+            max_kick,
+        }
     }
 
     // -- Public API ---------------------------------------------------------
@@ -171,7 +177,11 @@ impl CuckooTable {
         for &idx in &[h1, h2] {
             let bucket = self.buckets[idx];
             if bucket.matches_key(hash, &key.digest) && !bucket.is_tombstone() {
-                let mode = if bucket.is_extent() { BucketMode::Extent } else { BucketMode::Inline };
+                let mode = if bucket.is_extent() {
+                    BucketMode::Extent
+                } else {
+                    BucketMode::Inline
+                };
                 let (extent_offset, extent_length) = if bucket.is_extent() {
                     bucket.extent_ref()
                 } else {
@@ -267,13 +277,7 @@ impl CuckooTable {
     }
 
     /// CAS-based insert into a specific slot.
-    fn try_cas_insert(
-        &self,
-        key: &HashedKey,
-        value: &[u8],
-        mode: BucketMode,
-        idx: usize,
-    ) -> bool {
+    fn try_cas_insert(&self, key: &HashedKey, value: &[u8], mode: BucketMode, idx: usize) -> bool {
         // SAFETY: We use raw pointer access to the bucket to avoid going
         // through a shared & reference. In local mode this simulates what
         // RDMA CAS would do in production. HashBucket is Pod — raw writes
@@ -281,7 +285,9 @@ impl CuckooTable {
         unsafe {
             let ptr = self.buckets.as_ptr().add(idx) as *mut HashBucket;
             let bucket = ptr.read();
-            if bucket.is_locked() { return false; }
+            if bucket.is_locked() {
+                return false;
+            }
             if bucket.is_empty() || bucket.is_tombstone() {
                 // Atomically claim this slot.
                 // In local mode, we directly write (no real CAS needed).
@@ -315,7 +321,11 @@ impl CuckooTable {
 
     /// Read a bucket's value as a LookupResult (used by lock-free lookup).
     fn read_bucket_value(&self, bucket: &HashBucket) -> Option<LookupResult> {
-        let mode = if bucket.is_extent() { BucketMode::Extent } else { BucketMode::Inline };
+        let mode = if bucket.is_extent() {
+            BucketMode::Extent
+        } else {
+            BucketMode::Inline
+        };
         let (extent_offset, extent_length) = if bucket.is_extent() {
             bucket.extent_ref()
         } else {
@@ -348,8 +358,12 @@ impl CuckooTable {
 
     fn try_read_bucket(&self, key: &HashedKey, idx: usize) -> Option<(Vec<u8>, BucketMode)> {
         let bucket = &self.buckets[idx];
-        if bucket.is_locked() { return None; }
-        if !bucket.matches_key(key.hash, &key.digest) { return None; }
+        if bucket.is_locked() {
+            return None;
+        }
+        if !bucket.matches_key(key.hash, &key.digest) {
+            return None;
+        }
 
         if bucket.is_inline() {
             Some((bucket.inline_value().to_vec(), BucketMode::Inline))
@@ -474,7 +488,11 @@ impl CuckooTable {
             let occ_hash = occupant.key_hash;
             let occ_digest = occupant.key_or_digest;
             let occ_body = occupant.body;
-            let occ_mode = if occupant.is_extent() { BucketMode::Extent } else { BucketMode::Inline };
+            let occ_mode = if occupant.is_extent() {
+                BucketMode::Extent
+            } else {
+                BucketMode::Inline
+            };
 
             // 2. Overwrite current slot with the incoming key.
             self.write_slot(cur_idx as u64, cur_hash, cur_digest, cur_body, cur_mode);
@@ -607,8 +625,13 @@ mod tests {
         let k = make_key(0x2222, 11);
 
         // Insert as Inline first
-        table.insert(&k, b"inline_data", BucketMode::Inline).unwrap();
-        assert_eq!(table.lookup(&key(0x2222, 11)).unwrap().mode, BucketMode::Inline);
+        table
+            .insert(&k, b"inline_data", BucketMode::Inline)
+            .unwrap();
+        assert_eq!(
+            table.lookup(&key(0x2222, 11)).unwrap().mode,
+            BucketMode::Inline
+        );
 
         // Overwrite as Extent
         table.insert_extent(&k, 0x5000, 0x6000).unwrap();
@@ -706,16 +729,16 @@ mod tests {
     #[test]
     fn zero_hash_rejected() {
         let mut table = CuckooTable::new(16, DEFAULT_MAX_KICK);
-        let k = HashedKey { hash: 0, digest: [1u8; 16] };
+        let k = HashedKey {
+            hash: 0,
+            digest: [1u8; 16],
+        };
 
         assert_eq!(
             table.insert(&k, b"x", BucketMode::Inline),
             Err(CuckooError::InvalidKey)
         );
-        assert_eq!(
-            table.insert_extent(&k, 0, 0),
-            Err(CuckooError::InvalidKey)
-        );
+        assert_eq!(table.insert_extent(&k, 0, 0), Err(CuckooError::InvalidKey));
     }
 
     // -----------------------------------------------------------------------
@@ -726,8 +749,14 @@ mod tests {
     fn same_hash_different_digest() {
         let mut table = CuckooTable::new(16, DEFAULT_MAX_KICK);
 
-        let k1 = HashedKey { hash: 0x9999, digest: *b"AAAA_AAAA_AAAA_A" };
-        let k2 = HashedKey { hash: 0x9999, digest: *b"BBBB_BBBB_BBBB_B" };
+        let k1 = HashedKey {
+            hash: 0x9999,
+            digest: *b"AAAA_AAAA_AAAA_A",
+        };
+        let k2 = HashedKey {
+            hash: 0x9999,
+            digest: *b"BBBB_BBBB_BBBB_B",
+        };
 
         table.insert(&k1, b"alpha", BucketMode::Inline).unwrap();
         table.insert(&k2, b"beta", BucketMode::Inline).unwrap();
@@ -743,8 +772,14 @@ mod tests {
     fn collision_lookup_uses_digest_to_disambiguate() {
         let mut table = CuckooTable::new(16, DEFAULT_MAX_KICK);
 
-        let k1 = HashedKey { hash: 42, digest: [1u8; 16] };
-        let k2 = HashedKey { hash: 42, digest: [2u8; 16] };
+        let k1 = HashedKey {
+            hash: 42,
+            digest: [1u8; 16],
+        };
+        let k2 = HashedKey {
+            hash: 42,
+            digest: [2u8; 16],
+        };
 
         table.insert(&k1, b"first_val", BucketMode::Inline).unwrap();
 
@@ -767,7 +802,9 @@ mod tests {
         let k = make_key(0x7001, 50);
 
         // Insert
-        table.insert(&k, b"roundtrip_test", BucketMode::Inline).unwrap();
+        table
+            .insert(&k, b"roundtrip_test", BucketMode::Inline)
+            .unwrap();
 
         // Lookup
         let res = table.lookup(&key(0x7001, 50)).unwrap();
@@ -837,7 +874,9 @@ mod tests {
         let mut table = CuckooTable::new(16, DEFAULT_MAX_KICK);
         let k = make_key(0x8003, 62);
 
-        table.insert_extent(&k, 0x1234567890ABCDEF, 0xFEDCBA0987654321).unwrap();
+        table
+            .insert_extent(&k, 0x1234567890ABCDEF, 0xFEDCBA0987654321)
+            .unwrap();
 
         // Check raw bucket body.
         let h1 = table.h1(0x8003);
@@ -892,9 +931,9 @@ mod tests {
 
         // A new key that maps to the same slot(s) should reuse the tombstone.
         let k2 = make_key(0x9001, 70); // same key — but h1/h2 are the same
-        // Actually use a different key that hashes to the same slot.
-        // We'll just try to re-insert k1 (same hash → same buckets).
-        // The tombstone slot should be reusable.
+                                       // Actually use a different key that hashes to the same slot.
+                                       // We'll just try to re-insert k1 (same hash → same buckets).
+                                       // The tombstone slot should be reusable.
         table.insert(&k2, b"reused", BucketMode::Inline).unwrap();
         let res = table.lookup(&key(0x9001, 70)).unwrap();
         assert_eq!(&res.value[..6], b"reused");
@@ -954,11 +993,14 @@ mod tests {
         // Say hash % 4 = 1, ((hash>>32) % 4) = 0, (0|1) = 1. Both 1.
         // Or hash % 4 = 3, ((hash>>32) % 4) = 2, (2|1) = 3. Both 3.
         let _hash = 3u64; // h1 = 3, h2 = ((0>>32)%4)|1 = 0|1 = 1. Different.
-        // Let's just test that the table doesn't crash when h1 == h2.
-        // With bucket_count = 2, one possible odd h2 is 1.
-        // h1 could be 1 too. hash=1: h1=1, h2=((0)%2)|1 = 1. Both 1.
+                          // Let's just test that the table doesn't crash when h1 == h2.
+                          // With bucket_count = 2, one possible odd h2 is 1.
+                          // h1 could be 1 too. hash=1: h1=1, h2=((0)%2)|1 = 1. Both 1.
         let mut table = CuckooTable::new(2, DEFAULT_MAX_KICK);
-        let k = HashedKey { hash: 1, digest: [0xABu8; 16] };
+        let k = HashedKey {
+            hash: 1,
+            digest: [0xABu8; 16],
+        };
 
         // This should not panic — either Ok or TableFull.
         let _ = table.insert(&k, b"x", BucketMode::Inline);
@@ -983,7 +1025,9 @@ mod tests {
         let table = CuckooTable::new(64, 16);
         let key = bench_key("lf_key");
         let val = 42u64.to_le_bytes();
-        assert!(table.insert_lock_free(&key, &val, BucketMode::Inline).is_ok());
+        assert!(table
+            .insert_lock_free(&key, &val, BucketMode::Inline)
+            .is_ok());
         assert!(table.lookup_lock_free(&key).is_some());
     }
 
@@ -993,17 +1037,21 @@ mod tests {
         // Large table (64K buckets) to avoid collisions, since lock-free
         // insert has no kick chain (deferred to Wave 7).
         let table = Arc::new(CuckooTable::new(65536, 16));
-        let threads: Vec<_> = (0..4).map(|t| {
-            let table = table.clone();
-            std::thread::spawn(move || {
-                for i in 0..100 {
-                    let key = bench_key(&format!("ct{}_k{}", t, i));
-                    let val = ((t * 100 + i) as u64).to_le_bytes();
-                    let _ = table.insert_lock_free(&key, &val, BucketMode::Inline);
-                }
+        let threads: Vec<_> = (0..4)
+            .map(|t| {
+                let table = table.clone();
+                std::thread::spawn(move || {
+                    for i in 0..100 {
+                        let key = bench_key(&format!("ct{}_k{}", t, i));
+                        let val = ((t * 100 + i) as u64).to_le_bytes();
+                        let _ = table.insert_lock_free(&key, &val, BucketMode::Inline);
+                    }
+                })
             })
-        }).collect();
-        for h in threads { h.join().unwrap(); }
+            .collect();
+        for h in threads {
+            h.join().unwrap();
+        }
         // Verify all keys readable
         for t in 0..4 {
             for i in 0..100 {

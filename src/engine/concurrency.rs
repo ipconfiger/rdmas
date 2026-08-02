@@ -132,10 +132,7 @@ impl<'a> AtomicBucket<'a> {
 /// If the bucket is locked but the lease has expired, this function treats
 /// the bucket as unlocked and proceeds with CAS.  The stale holder's lease
 /// is overwritten.
-pub fn try_acquire_lock(
-    bucket: &AtomicBucket,
-    mode: BucketMode,
-) -> Result<u64, LockError> {
+pub fn try_acquire_lock(bucket: &AtomicBucket, mode: BucketMode) -> Result<u64, LockError> {
     loop {
         let old_lv = bucket.load_lock();
 
@@ -286,10 +283,7 @@ pub enum TakeoverResult {
 ///   previous operation was a delete, or leave as-is for re-insert).
 /// - `TakeoverResult::NotExpired` if the lock is still valid.
 /// - `TakeoverResult::NotLocked` if the bucket was not locked.
-pub fn force_takeover(
-    bucket: &mut HashBucket,
-    timeout_ms: u32,
-) -> TakeoverResult {
+pub fn force_takeover(bucket: &mut HashBucket, timeout_ms: u32) -> TakeoverResult {
     if !bucket.is_locked() {
         return TakeoverResult::NotLocked;
     }
@@ -508,7 +502,10 @@ mod tests {
 
         // try_acquire_lock should detect expiry and succeed (force takeover).
         let result = try_acquire_lock(&ab, BucketMode::Inline);
-        assert!(result.is_ok(), "force takeover should succeed on expired lease");
+        assert!(
+            result.is_ok(),
+            "force takeover should succeed on expired lease"
+        );
 
         assert!(b.is_locked());
     }
@@ -604,14 +601,16 @@ mod tests {
 
         // Set an expired lock: lock set, lease in the past
         let old_lease = now.wrapping_sub(LEASE_TIMEOUT_MS + 1);
-        bucket.lock_version =
-            ((1u64) << 32) | ((old_lease as u64) << 8) | 0x01; // version=1, locked
-        // mode = 0 (Inline)
+        bucket.lock_version = ((1u64) << 32) | ((old_lease as u64) << 8) | 0x01; // version=1, locked
+                                                                                 // mode = 0 (Inline)
 
         let result = force_takeover(&mut bucket, LEASE_TIMEOUT_MS);
         match result {
             TakeoverResult::Success { .. } => {
-                assert!(!bucket.is_locked(), "Bucket should be unlocked after takeover");
+                assert!(
+                    !bucket.is_locked(),
+                    "Bucket should be unlocked after takeover"
+                );
                 assert!(bucket.version() > 1, "Version should have incremented");
             }
             _ => panic!("Expected Success, got {:?}", result),
@@ -622,8 +621,7 @@ mod tests {
     fn test_force_takeover_not_expired() {
         let mut bucket = zero_bucket();
         let now = now_ms();
-        bucket.lock_version =
-            ((1u64) << 32) | ((now as u64) << 8) | 0x01; // freshly locked
+        bucket.lock_version = ((1u64) << 32) | ((now as u64) << 8) | 0x01; // freshly locked
 
         let result = force_takeover(&mut bucket, LEASE_TIMEOUT_MS);
         assert_eq!(result, TakeoverResult::NotExpired);
@@ -643,8 +641,7 @@ mod tests {
         let now = now_ms();
         // Extent mode (bit2=1), locked (bit0=1) = 0x05
         let old_lease = now.wrapping_sub(LEASE_TIMEOUT_MS + 1);
-        bucket.lock_version =
-            ((1u64) << 32) | ((old_lease as u64) << 8) | 0x05;
+        bucket.lock_version = ((1u64) << 32) | ((old_lease as u64) << 8) | 0x05;
 
         let result = force_takeover(&mut bucket, LEASE_TIMEOUT_MS);
         assert!(matches!(result, TakeoverResult::Success { .. }));

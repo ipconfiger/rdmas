@@ -35,7 +35,10 @@ fn test_table_full_recovery() {
     }
 
     assert!(last_failure, "Table should have filled up");
-    assert!(inserted > 0, "Should have inserted some keys before filling");
+    assert!(
+        inserted > 0,
+        "Should have inserted some keys before filling"
+    );
 
     // Free space by deleting a few entries.
     // We know at least the first key was inserted, so delete it.
@@ -158,8 +161,14 @@ fn test_extent_allocation_exhaustion() {
         }
     }
 
-    assert!(!offsets.is_empty(), "Should have allocated at least one extent");
-    assert!(offsets.len() >= 3, "Should fit several extents before exhaustion");
+    assert!(
+        !offsets.is_empty(),
+        "Should have allocated at least one extent"
+    );
+    assert!(
+        offsets.len() >= 3,
+        "Should fit several extents before exhaustion"
+    );
 
     // Verify OutOfSpace: next allocation returns None.
     assert!(region.allocate(&data).is_none(), "Region should be full");
@@ -167,7 +176,9 @@ fn test_extent_allocation_exhaustion() {
     // Free extents via GC: mark first half for collection.
     let mid = offsets.len() / 2;
     for &off in &offsets[..mid] {
-        region.mark_for_gc(off, 10).expect("mark_for_gc should succeed");
+        region
+            .mark_for_gc(off, 10)
+            .expect("mark_for_gc should succeed");
     }
 
     // Sweep with min_active_epoch > 10.
@@ -176,5 +187,8 @@ fn test_extent_allocation_exhaustion() {
 
     // Now new allocations should succeed.
     let new_off = region.allocate(&data);
-    assert!(new_off.is_some(), "Should be able to allocate after GC sweep");
+    assert!(
+        new_off.is_some(),
+        "Should be able to allocate after GC sweep"
+    );
 }

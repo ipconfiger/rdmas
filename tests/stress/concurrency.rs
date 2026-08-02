@@ -110,8 +110,6 @@ fn test_concurrent_cas_no_deadlock() {
 
     println!(
         "No-deadlock test: {} ops across {} threads in {:?}",
-        total_ops,
-        num_threads,
-        elapsed,
+        total_ops, num_threads, elapsed,
     );
 }

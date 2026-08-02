@@ -6,11 +6,8 @@
 
 #[cfg(feature = "director")]
 use rdmas_director::proto::{
-    director_client::DirectorClient,
-    DeregisterRequest, DeregisterResponse,
-    HeartbeatRequest, HeartbeatResponse,
-    RegisterRequest, RegisterResponse,
-    ReportRemoveRequest, ReportStoreRequest,
+    director_client::DirectorClient, DeregisterRequest, DeregisterResponse, HeartbeatRequest,
+    HeartbeatResponse, RegisterRequest, RegisterResponse, ReportRemoveRequest, ReportStoreRequest,
 };
 
 /// Parses the chunk hash from an LMCache key and returns it as a u64.
@@ -199,10 +196,7 @@ impl DirectorIntegration {
     ///
     /// Called periodically (every ~10 seconds) from a background task.
     /// Failures are best-effort — the caller logs a warning and continues.
-    pub async fn heartbeat(
-        &self,
-        instance_id: &str,
-    ) -> Result<HeartbeatResponse, tonic::Status> {
+    pub async fn heartbeat(&self, instance_id: &str) -> Result<HeartbeatResponse, tonic::Status> {
         let active_ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -219,10 +213,7 @@ impl DirectorIntegration {
     ///
     /// Called on connector close. Best-effort — failures are logged but do
     /// not block shutdown.
-    pub async fn deregister(
-        &self,
-        instance_id: &str,
-    ) -> Result<DeregisterResponse, tonic::Status> {
+    pub async fn deregister(&self, instance_id: &str) -> Result<DeregisterResponse, tonic::Status> {
         let request = DeregisterRequest {
             instance_id: instance_id.to_string(),
         };

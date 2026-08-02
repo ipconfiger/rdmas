@@ -498,7 +498,7 @@ mod tests {
     fn test_set_locked_clamps_lease_24bit() {
         let mut b = zero_bucket();
         b.set_locked(0xFF_FFFF + 10, BucketMode::Inline); // exceeds 24 bits
-        // Only lower 24 bits should be stored
+                                                          // Only lower 24 bits should be stored
         assert_eq!(b.lease_ts(), (0xFF_FFFF + 10) & 0xFF_FFFF);
     }
 
@@ -554,7 +554,7 @@ mod tests {
     fn test_is_expired_true() {
         let mut b = zero_bucket();
         b.lock_version = (0u64 << 32) | (0u64 << 8) | 0x01; // locked, lease_ts=0
-        // now=200, timeout=100 → 200-0 >= 100
+                                                            // now=200, timeout=100 → 200-0 >= 100
         assert!(b.is_expired(200, 100));
     }
 
@@ -562,7 +562,7 @@ mod tests {
     fn test_is_expired_false_still_valid() {
         let mut b = zero_bucket();
         b.lock_version = (0u64 << 32) | (100u64 << 8) | 0x01; // locked, lease_ts=100
-        // now=150, timeout=100 → 150-100=50 < 100
+                                                              // now=150, timeout=100 → 150-100=50 < 100
         assert!(!b.is_expired(150, 100));
     }
 
@@ -577,7 +577,7 @@ mod tests {
     fn test_is_expired_exact_boundary() {
         let mut b = zero_bucket();
         b.lock_version = (0u64 << 32) | (50u64 << 8) | 0x01; // locked, lease_ts=50
-        // now=150, timeout=100 → 150-50=100 == 100 → expired
+                                                             // now=150, timeout=100 → 150-50=100 == 100 → expired
         assert!(b.is_expired(150, 100));
     }
 

@@ -124,8 +124,7 @@ fn handle_client<S: Read + Write>(stream: &mut S, buffer: &mut [u8]) {
                     return;
                 }
                 let offset = u64::from_le_bytes(params[..8].try_into().unwrap()) as usize;
-                let data_len =
-                    u32::from_le_bytes(params[12..16].try_into().unwrap()) as usize;
+                let data_len = u32::from_le_bytes(params[12..16].try_into().unwrap()) as usize;
 
                 let end = (offset + data_len).min(buffer.len());
                 let actual_len = end.saturating_sub(offset);
@@ -149,8 +148,7 @@ fn handle_client<S: Read + Write>(stream: &mut S, buffer: &mut [u8]) {
                     return;
                 }
                 let offset = u64::from_le_bytes(params[..8].try_into().unwrap()) as usize;
-                let data_len =
-                    u32::from_le_bytes(params[12..16].try_into().unwrap()) as usize;
+                let data_len = u32::from_le_bytes(params[12..16].try_into().unwrap()) as usize;
 
                 let mut data = vec![0u8; data_len];
                 if stream.read_exact(&mut data).is_err() {
@@ -216,7 +214,10 @@ fn handle_client<S: Read + Write>(stream: &mut S, buffer: &mut [u8]) {
 #[test]
 fn test_tcp_read() {
     let server = MockTcpServer::new();
-    let rt = tokio::runtime::Builder::new_current_thread().enable_io().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .unwrap();
 
     rt.block_on(async {
         let transport = TcpTransport::connect(server.addr()).await.unwrap();
@@ -232,7 +233,10 @@ fn test_tcp_read() {
 #[test]
 fn test_tcp_read_partial_offset() {
     let server = MockTcpServer::new();
-    let rt = tokio::runtime::Builder::new_current_thread().enable_io().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .unwrap();
 
     // Pre-populate known values at server offsets [100..164]
     // We connect, write known data, then read it back.
@@ -251,7 +255,10 @@ fn test_tcp_read_partial_offset() {
 #[test]
 fn test_tcp_write() {
     let server = MockTcpServer::new();
-    let rt = tokio::runtime::Builder::new_current_thread().enable_io().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .unwrap();
 
     rt.block_on(async {
         let transport = TcpTransport::connect(server.addr()).await.unwrap();
@@ -274,7 +281,10 @@ fn test_tcp_write() {
 #[test]
 fn test_tcp_write_large_payload() {
     let server = MockTcpServer::new();
-    let rt = tokio::runtime::Builder::new_current_thread().enable_io().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .unwrap();
 
     rt.block_on(async {
         let transport = TcpTransport::connect(server.addr()).await.unwrap();
@@ -293,7 +303,10 @@ fn test_tcp_write_large_payload() {
 #[test]
 fn test_tcp_cas_success() {
     let server = MockTcpServer::new();
-    let rt = tokio::runtime::Builder::new_current_thread().enable_io().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .unwrap();
 
     rt.block_on(async {
         let transport = TcpTransport::connect(server.addr()).await.unwrap();
@@ -303,14 +316,20 @@ fn test_tcp_cas_success() {
             .cas(0xAAAAAAAA_AAAAAAAA, 0xDEADBEEF_DEADBEEF, 0, 0, 0)
             .await
             .unwrap();
-        assert!(result, "CAS should succeed when compare matches initial 0xAA");
+        assert!(
+            result,
+            "CAS should succeed when compare matches initial 0xAA"
+        );
     });
 }
 
 #[test]
 fn test_tcp_cas_failure() {
     let server = MockTcpServer::new();
-    let rt = tokio::runtime::Builder::new_current_thread().enable_io().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .unwrap();
 
     rt.block_on(async {
         let transport = TcpTransport::connect(server.addr()).await.unwrap();
@@ -326,14 +345,20 @@ fn test_tcp_cas_failure() {
             .cas(0xAAAAAAAA_AAAAAAAA, 0xCAFECAFE_CAFECAFE, 0, 0, 0)
             .await
             .unwrap();
-        assert!(!result, "CAS should fail when compare does not match current value");
+        assert!(
+            !result,
+            "CAS should fail when compare does not match current value"
+        );
     });
 }
 
 #[test]
 fn test_tcp_cas_chain() {
     let server = MockTcpServer::new();
-    let rt = tokio::runtime::Builder::new_current_thread().enable_io().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .unwrap();
 
     rt.block_on(async {
         let transport = TcpTransport::connect(server.addr()).await.unwrap();
@@ -347,7 +372,11 @@ fn test_tcp_cas_chain() {
 
         for (compare, swap) in &values {
             let result = transport.cas(*compare, *swap, 0, 0, 0).await.unwrap();
-            assert!(result, "CAS chain step failed: {:#x} -> {:#x}", compare, swap);
+            assert!(
+                result,
+                "CAS chain step failed: {:#x} -> {:#x}",
+                compare, swap
+            );
         }
     });
 }
@@ -355,7 +384,10 @@ fn test_tcp_cas_chain() {
 #[test]
 fn test_tcp_concurrent_reads() {
     let server = MockTcpServer::new();
-    let rt = tokio::runtime::Builder::new_current_thread().enable_io().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .unwrap();
 
     rt.block_on(async {
         let transport = Arc::new(TcpTransport::connect(server.addr()).await.unwrap());
@@ -378,7 +410,10 @@ fn test_tcp_concurrent_reads() {
 #[test]
 fn test_tcp_concurrent_writes() {
     let server = MockTcpServer::new();
-    let rt = tokio::runtime::Builder::new_current_thread().enable_io().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .unwrap();
 
     rt.block_on(async {
         let transport = Arc::new(TcpTransport::connect(server.addr()).await.unwrap());
@@ -406,14 +441,20 @@ fn test_tcp_concurrent_writes() {
 
 #[test]
 fn test_tcp_connect_invalid_address() {
-    let rt = tokio::runtime::Builder::new_current_thread().enable_io().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .unwrap();
     let result = rt.block_on(TcpTransport::connect("127.0.0.1:19999"));
     assert!(result.is_err(), "Connect to closed port should fail");
 }
 
 #[test]
 fn test_tcp_connect_bad_hostname() {
-    let rt = tokio::runtime::Builder::new_current_thread().enable_io().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .unwrap();
     let result = rt.block_on(TcpTransport::connect("invalid.host.name:12345"));
     assert!(result.is_err(), "Connect to invalid hostname should fail");
 }
@@ -421,7 +462,10 @@ fn test_tcp_connect_bad_hostname() {
 #[test]
 fn test_tcp_is_rdma_false() {
     let server = MockTcpServer::new();
-    let rt = tokio::runtime::Builder::new_current_thread().enable_io().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .unwrap();
     rt.block_on(async {
         let transport = TcpTransport::connect(server.addr()).await.unwrap();
         assert!(!transport.is_rdma());
@@ -431,7 +475,10 @@ fn test_tcp_is_rdma_false() {
 #[test]
 fn test_tcp_name() {
     let server = MockTcpServer::new();
-    let rt = tokio::runtime::Builder::new_current_thread().enable_io().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .unwrap();
     rt.block_on(async {
         let transport = TcpTransport::connect(server.addr()).await.unwrap();
         assert_eq!(transport.name(), "TCP");
@@ -443,7 +490,10 @@ fn test_tcp_multiple_operations_single_connection() {
     // Verify the transport can do many ops on one connection without
     // protocol desynchronization.
     let server = MockTcpServer::new();
-    let rt = tokio::runtime::Builder::new_current_thread().enable_io().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .unwrap();
 
     rt.block_on(async {
         let transport = TcpTransport::connect(server.addr()).await.unwrap();

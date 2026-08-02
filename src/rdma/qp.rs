@@ -79,10 +79,7 @@ impl QueuePair {
         // Query the QP number via our C accessor (ibv_qp is opaque in bindings).
         let qp_num = unsafe { ibv_qp_get_qp_num(qp) };
 
-        Ok(QueuePair {
-            inner: qp,
-            qp_num,
-        })
+        Ok(QueuePair { inner: qp, qp_num })
     }
 
     /// Get the local QP number.
@@ -215,7 +212,8 @@ impl QueuePair {
             | ibv_qp_attr_mask::IBV_QP_TIMEOUT as u32
             | ibv_qp_attr_mask::IBV_QP_RETRY_CNT as u32
             | ibv_qp_attr_mask::IBV_QP_RNR_RETRY as u32
-            | ibv_qp_attr_mask::IBV_QP_MAX_QP_RD_ATOMIC as u32) as libc::c_int;
+            | ibv_qp_attr_mask::IBV_QP_MAX_QP_RD_ATOMIC as u32)
+            as libc::c_int;
 
         let ret = unsafe { ibv_modify_qp(self.inner, &mut attr, attr_mask) };
         if ret != 0 {
@@ -236,11 +234,15 @@ impl QueuePair {
     /// Returns the `wr_id` of the posted WR on success, which can be matched
     /// against the `wr_id` in the [`WorkCompletion`] from [`CompletionQueue::poll`].
     pub fn post_send(&self, wr: &mut SendWorkRequest) -> Result<u64, RdmaError> {
-        let mut sge_entries: Vec<ibv_sge> = wr.sge.iter().map(|sge| ibv_sge {
-            addr: sge.addr as u64,
-            length: sge.length,
-            lkey: sge.lkey,
-        }).collect();
+        let mut sge_entries: Vec<ibv_sge> = wr
+            .sge
+            .iter()
+            .map(|sge| ibv_sge {
+                addr: sge.addr as u64,
+                length: sge.length,
+                lkey: sge.lkey,
+            })
+            .collect();
 
         let wr_id = wr.wr_id;
 
@@ -283,9 +285,7 @@ impl QueuePair {
 
         let mut bad_wr: *mut ibv_send_wr = ptr::null_mut();
 
-        let ret = unsafe {
-            ibv_post_send_wr(self.inner, &mut send_wr, &mut bad_wr)
-        };
+        let ret = unsafe { ibv_post_send_wr(self.inner, &mut send_wr, &mut bad_wr) };
 
         if ret != 0 {
             return Err(RdmaError::HardwareError(format!(
@@ -400,11 +400,15 @@ impl QueuePair {
     ///
     /// Returns the `wr_id` of the posted WR on success.
     pub fn post_recv(&self, wr: &mut RecvWorkRequest) -> Result<u64, RdmaError> {
-        let mut sge_entries: Vec<ibv_sge> = wr.sge.iter().map(|sge| ibv_sge {
-            addr: sge.addr as u64,
-            length: sge.length,
-            lkey: sge.lkey,
-        }).collect();
+        let mut sge_entries: Vec<ibv_sge> = wr
+            .sge
+            .iter()
+            .map(|sge| ibv_sge {
+                addr: sge.addr as u64,
+                length: sge.length,
+                lkey: sge.lkey,
+            })
+            .collect();
 
         let wr_id = wr.wr_id;
 
@@ -421,9 +425,7 @@ impl QueuePair {
 
         let mut bad_wr: *mut ibv_recv_wr = ptr::null_mut();
 
-        let ret = unsafe {
-            ibv_post_recv_wr(self.inner, &mut recv_wr, &mut bad_wr)
-        };
+        let ret = unsafe { ibv_post_recv_wr(self.inner, &mut recv_wr, &mut bad_wr) };
 
         if ret != 0 {
             return Err(RdmaError::HardwareError(format!(
@@ -439,7 +441,6 @@ impl QueuePair {
     pub fn as_ptr(&self) -> *mut ibv_qp {
         self.inner
     }
-
 }
 
 impl Drop for QueuePair {

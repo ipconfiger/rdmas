@@ -48,6 +48,9 @@ pub enum RdmaError {
 impl RdmaError {
     /// Returns `true` if the operation should be retried.
     pub fn is_retriable(&self) -> bool {
-        matches!(self, Self::Timeout | Self::CasFailed | Self::VersionMismatch | Self::NotConnected)
+        matches!(
+            self,
+            Self::Timeout | Self::CasFailed | Self::VersionMismatch | Self::NotConnected
+        )
     }
 }

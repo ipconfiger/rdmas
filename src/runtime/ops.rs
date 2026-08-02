@@ -54,11 +54,7 @@ impl RdmaRuntime {
     /// * `qp` — The queue pair to post work requests to.
     /// * `cq` — The completion queue for harvesting completions.
     /// * `pending` — The pending map returned by [`Poller::spawn`](super::poller::Poller::spawn).
-    pub fn new(
-        qp: Arc<QueuePair>,
-        cq: Arc<CompletionQueue>,
-        pending: PendingMap,
-    ) -> Self {
+    pub fn new(qp: Arc<QueuePair>, cq: Arc<CompletionQueue>, pending: PendingMap) -> Self {
         Self {
             qp,
             cq,
@@ -204,10 +200,7 @@ impl RdmaRuntime {
     /// is generated for the entire batch.
     ///
     /// Returns the `wr_id` of the last WR (matching the completion).
-    pub async fn rdma_batch(
-        &self,
-        wrs: &mut [SendWorkRequest],
-    ) -> Result<u64, RdmaError> {
+    pub async fn rdma_batch(&self, wrs: &mut [SendWorkRequest]) -> Result<u64, RdmaError> {
         let last_id = wrs.last().map(|w| w.wr_id).unwrap_or(0);
 
         // Step 1: Create a oneshot channel
@@ -271,10 +264,7 @@ impl RdmaRuntime {
     /// 4. If post fails, remove the pending entry and return the error.
     /// 5. Await the oneshot receiver — the poller thread will send the
     ///    completion when it arrives.
-    async fn post_and_wait(
-        &self,
-        mut wr: SendWorkRequest,
-    ) -> Result<WorkCompletion, RdmaError> {
+    async fn post_and_wait(&self, mut wr: SendWorkRequest) -> Result<WorkCompletion, RdmaError> {
         let wr_id = wr.wr_id;
 
         // Step 1: Create a oneshot channel

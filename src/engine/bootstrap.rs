@@ -39,11 +39,7 @@ impl BootstrappedEngine {
     ///
     /// Panics if `bucket_count` is not a power of two or is zero (enforced by
     /// [`CuckooTable::new`]).
-    pub fn bootstrap(
-        bucket_count: u64,
-        large_object_region_size: usize,
-        max_kick: u32,
-    ) -> Self {
+    pub fn bootstrap(bucket_count: u64, large_object_region_size: usize, max_kick: u32) -> Self {
         Self::bootstrap_with_slab(bucket_count, large_object_region_size, max_kick, 0, 0)
     }
 
@@ -179,8 +175,14 @@ mod tests {
         // We insert a handful of keys to confirm the table is functional.
         use crate::engine::layout::*;
 
-        let _k1 = HashedKey { hash: 0xAAAA, digest: *b"key_one_________" };
-        let _k2 = HashedKey { hash: 0xBBBB, digest: *b"key_two_________" };
+        let _k1 = HashedKey {
+            hash: 0xAAAA,
+            digest: *b"key_one_________",
+        };
+        let _k2 = HashedKey {
+            hash: 0xBBBB,
+            digest: *b"key_two_________",
+        };
 
         // Both insertions should succeed since the table starts empty.
         // (We can't easily expose insert on the engine directly without
@@ -284,13 +286,7 @@ mod tests {
 
     #[test]
     fn test_bootstrap_with_slab() {
-        let engine = BootstrappedEngine::bootstrap_with_slab(
-            64,
-            1024 * 1024,
-            16,
-            64,
-            640,
-        );
+        let engine = BootstrappedEngine::bootstrap_with_slab(64, 1024 * 1024, 16, 64, 640);
         assert_eq!(engine.slab_chunk_count(), 10);
         assert_eq!(engine.slab.capacity(), 640);
     }
@@ -298,26 +294,14 @@ mod tests {
     #[test]
     fn test_bootstrap_slab_disabled() {
         // slab_chunk_size=0 or slab_region_size=0 means slab is disabled.
-        let engine = BootstrappedEngine::bootstrap_with_slab(
-            64,
-            1024,
-            16,
-            0,
-            0,
-        );
+        let engine = BootstrappedEngine::bootstrap_with_slab(64, 1024, 16, 0, 0);
         assert_eq!(engine.slab_chunk_count(), 0);
         assert_eq!(engine.slab.capacity(), 0);
     }
 
     #[test]
     fn test_stats_includes_slab_initial() {
-        let engine = BootstrappedEngine::bootstrap_with_slab(
-            64,
-            1024,
-            16,
-            128,
-            1280,
-        );
+        let engine = BootstrappedEngine::bootstrap_with_slab(64, 1024, 16, 128, 1280);
         let stats = engine.stats();
         assert_eq!(stats.slab_total_chunks, 10);
         assert_eq!(stats.slab_allocated_chunks, 0);
@@ -326,13 +310,7 @@ mod tests {
 
     #[test]
     fn test_stats_includes_slab_after_allocation() {
-        let mut engine = BootstrappedEngine::bootstrap_with_slab(
-            64,
-            1024,
-            16,
-            64,
-            640,
-        );
+        let mut engine = BootstrappedEngine::bootstrap_with_slab(64, 1024, 16, 64, 640);
         engine.slab.allocate_chunk();
         engine.slab.allocate_chunk();
 

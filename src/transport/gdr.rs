@@ -31,12 +31,7 @@ mod gdr_impl {
     extern "C" {
         fn cudaMalloc(dev_ptr: *mut *mut c_void, size: usize) -> i32;
         fn cudaFree(dev_ptr: *mut c_void) -> i32;
-        fn cudaMemcpy(
-            dst: *mut c_void,
-            src: *const c_void,
-            count: usize,
-            kind: i32,
-        ) -> i32;
+        fn cudaMemcpy(dst: *mut c_void, src: *const c_void, count: usize, kind: i32) -> i32;
     }
 
     const CUDA_MEMCPY_HOST_TO_DEVICE: i32 = 1;

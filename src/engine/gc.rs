@@ -61,11 +61,7 @@ impl EpochGc {
     /// Check if it's time to run a sweep and execute if so.
     ///
     /// Returns the number of extents reclaimed.
-    pub fn maybe_sweep(
-        &self,
-        region: &mut LargeObjectRegion,
-        min_active_ts: u32,
-    ) -> usize {
+    pub fn maybe_sweep(&self, region: &mut LargeObjectRegion, min_active_ts: u32) -> usize {
         let now = concurrency::now_ms() as u64;
         let mut last = self.last_sweep.lock().unwrap();
 
@@ -75,7 +71,8 @@ impl EpochGc {
             if let Some(lru) = &self.lru {
                 if lru.needs_eviction() {
                     // Evict 10% of watermark size or at least 1 entry.
-                    let n = (lru.key_count().saturating_sub(lru.key_count().min(1)) / 10).max(1) as usize;
+                    let n = (lru.key_count().saturating_sub(lru.key_count().min(1)) / 10).max(1)
+                        as usize;
                     return self.evict_lru(region, n);
                 }
             }
@@ -95,11 +92,7 @@ impl EpochGc {
     }
 
     /// Force a sweep cycle now.
-    pub fn sweep(
-        &self,
-        region: &mut LargeObjectRegion,
-        min_active_ts: u32,
-    ) -> usize {
+    pub fn sweep(&self, region: &mut LargeObjectRegion, min_active_ts: u32) -> usize {
         let mut pending = self.pending.lock().unwrap();
 
         // Mark all pending extents in the region with their epoch

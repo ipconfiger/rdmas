@@ -32,7 +32,10 @@ fn test_insert_throughput() {
     let elapsed = start.elapsed().as_secs_f64();
 
     let ops_per_sec = num_keys as f64 / elapsed;
-    println!("Insert throughput: {:.0} ops/sec ({num_keys} keys in {elapsed:.3}s)", ops_per_sec);
+    println!(
+        "Insert throughput: {:.0} ops/sec ({num_keys} keys in {elapsed:.3}s)",
+        ops_per_sec
+    );
 
     assert!(ops_per_sec > 0.0, "Throughput should be positive");
 }
@@ -68,7 +71,11 @@ fn test_mixed_read_write_throughput() {
                 let mut rng = rand::thread_rng();
                 for i in 0..ops_per_thread {
                     let write = rng.gen_bool(write_ratio);
-                    let key = format!("r{}_{:08}", rng.gen_range(0..10u64), rng.gen_range(0..preload));
+                    let key = format!(
+                        "r{}_{:08}",
+                        rng.gen_range(0..10u64),
+                        rng.gen_range(0..preload)
+                    );
                     let hk = hash_key(&key);
 
                     let mut tbl = table.lock().unwrap();

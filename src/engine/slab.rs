@@ -343,13 +343,8 @@ mod tests {
 
     #[test]
     fn test_bootstrap_engine_includes_slab() {
-        let engine = BootstrappedEngine::bootstrap_with_slab(
-            64,
-            1024 * 1024,
-            16,
-            65536,
-            65536 * 100,
-        );
+        let engine =
+            BootstrappedEngine::bootstrap_with_slab(64, 1024 * 1024, 16, 65536, 65536 * 100);
 
         assert_eq!(engine.slab_chunk_count(), 100);
         assert_eq!(engine.bucket_count(), 64);
@@ -357,13 +352,7 @@ mod tests {
 
     #[test]
     fn test_engine_stats_includes_slab() {
-        let engine = BootstrappedEngine::bootstrap_with_slab(
-            64,
-            1024,
-            16,
-            64,
-            640,
-        );
+        let engine = BootstrappedEngine::bootstrap_with_slab(64, 1024, 16, 64, 640);
 
         let stats = engine.stats();
         assert_eq!(stats.slab_total_chunks, 10);

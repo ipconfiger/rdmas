@@ -92,8 +92,8 @@ impl ControlPlane for ControlServer {
                 // actual HugePage regions with real rkey/vaddr.
                 // For now, provide placeholder metadata.
                 RegionMetadata {
-                    vaddr: 0,  // Set by actual MR registration in distributed mode
-                    rkey: 0,   // Set by actual MR registration
+                    vaddr: 0,                         // Set by actual MR registration in distributed mode
+                    rkey: 0,                          // Set by actual MR registration
                     size: engine.bucket_count() * 64, // Each bucket = 64B
                     r#type: RegionType::HashTable as i32,
                     generation: self.generation,
@@ -111,7 +111,7 @@ impl ControlPlane for ControlServer {
                     // In distributed mode, these will be real HugePage vaddr/rkey.
                     vaddr: engine.free_list_header_addr(),
                     rkey: 0,
-                    size: 64,  // FreeListHeader is exactly 64 bytes (one cache line)
+                    size: 64, // FreeListHeader is exactly 64 bytes (one cache line)
                     r#type: RegionType::FreeList as i32,
                     generation: self.generation,
                 },

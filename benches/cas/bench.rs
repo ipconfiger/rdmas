@@ -13,7 +13,7 @@
 //! cargo bench --bench cas
 //! ```
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::time::Duration;
 
 mod harness;
@@ -42,9 +42,7 @@ fn bench_cas(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("cas_throughput", batch_size),
             &batch_size,
-            |b, &n| {
-                b.iter(|| harness::bench_cas_batch(black_box(&ctx), black_box(n)))
-            },
+            |b, &n| b.iter(|| harness::bench_cas_batch(black_box(&ctx), black_box(n))),
         );
     }
 

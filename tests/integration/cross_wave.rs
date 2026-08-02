@@ -1,15 +1,15 @@
 //! Cross-wave integration tests (T11-E).
 //! Verifies that features from different waves compose correctly.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
+use rdmas::api::KvEngine;
 use rdmas::engine::bootstrap::BootstrappedEngine;
 use rdmas::engine::extent::LargeObjectRegion;
-use rdmas::engine::layout::{BucketMode, HashedKey, is_v2, ExtentHeaderV2, EXTENT_MAGIC};
+use rdmas::engine::layout::{is_v2, BucketMode, ExtentHeaderV2, HashedKey, EXTENT_MAGIC};
 use rdmas::engine::lru::LruTracker;
 use rdmas::engine::watermark::{WatermarkConfig, WatermarkMonitor};
-use rdmas::api::KvEngine;
 
 use xxhash_rust::xxh64::xxh64;
 
@@ -111,9 +111,11 @@ fn test_lru_evicts_extent_entries() {
 #[test]
 fn test_watermark_detects_slab_exhaustion() {
     let mut engine = BootstrappedEngine::bootstrap_with_slab(
-        1024, 1024 * 1024, 16,
-        256,   // slab_chunk_size: 256B chunks
-        4096,  // slab_region_size: 4KB region (16 chunks)
+        1024,
+        1024 * 1024,
+        16,
+        256,  // slab_chunk_size: 256B chunks
+        4096, // slab_region_size: 4KB region (16 chunks)
     );
 
     let config = WatermarkConfig::default();
@@ -221,7 +223,11 @@ fn test_v1_extent_still_readable_after_lru_integration() {
     // read() correctly decodes both V1 and V2 formats.
     // For V1 extents, DecodedHeader.is_v2 is false.
     // The fact that read() returned the correct data proves backward compat.
-    assert_eq!(result.len(), data.len(), "V1 extent should contain correct data length");
+    assert_eq!(
+        result.len(),
+        data.len(),
+        "V1 extent should contain correct data length"
+    );
 
     // V1 extent should be freeable and recyclable.
     assert!(region.free(offset).is_ok());
@@ -235,11 +241,11 @@ fn test_v1_extent_still_readable_after_lru_integration() {
 fn test_full_stack_insert_read_evict() {
     // Create engine (Wave 9: Slab + Extent V2)
     let mut engine = BootstrappedEngine::bootstrap_with_slab(
-        1024,        // buckets
-        256 * 1024,  // 256KB extent region
-        16,          // max kick
-        64 * 1024,   // 64KB slab region
-        4096,        // 4KB chunks
+        1024,       // buckets
+        256 * 1024, // 256KB extent region
+        16,         // max kick
+        64 * 1024,  // 64KB slab region
+        4096,       // 4KB chunks
     );
 
     // Wave 10: Initialize LRU tracker and watermark monitor.
@@ -360,7 +366,10 @@ fn test_extent_header_version_detection() {
         checksum: 0,
     };
     let v2_bytes: &[u8] = bytes_of(&v2_header);
-    assert!(is_v2(v2_bytes), "V2 header with version=1 should be detected");
+    assert!(
+        is_v2(v2_bytes),
+        "V2 header with version=1 should be detected"
+    );
 
     // Simulate a V1 header: magic at offset 16, version byte at offset 4 is 0.
     // is_v2 checks magic at offset 0 and version byte at offset 4.
@@ -407,11 +416,11 @@ fn test_extent_header_version_detection() {
 #[test]
 fn test_slab_and_extent_coexistence() {
     let mut engine = BootstrappedEngine::bootstrap_with_slab(
-        64,         // buckets
-        4096,       // extent region: 4KB
-        16,         // max kick
-        4096,       // slab chunk size: 4KB
-        16 * 1024,  // slab region: 16KB (4 chunks)
+        64,        // buckets
+        4096,      // extent region: 4KB
+        16,        // max kick
+        4096,      // slab chunk size: 4KB
+        16 * 1024, // slab region: 16KB (4 chunks)
     );
 
     // Allocate from both slab and extent simultaneously.
@@ -486,7 +495,10 @@ fn test_kv_engine_trait_default_impls_compile() {
         fn exists(&self, _key: &[u8]) -> Result<bool, rdmas::error::RdmaError> {
             Ok(false)
         }
-        fn batch_get(&self, _keys: &[&[u8]]) -> Vec<Result<Option<Vec<u8>>, rdmas::error::RdmaError>> {
+        fn batch_get(
+            &self,
+            _keys: &[&[u8]],
+        ) -> Vec<Result<Option<Vec<u8>>, rdmas::error::RdmaError>> {
             Vec::new()
         }
         fn batch_put(&self, _kvs: &[(&[u8], &[u8])]) -> Vec<Result<(), rdmas::error::RdmaError>> {

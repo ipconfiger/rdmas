@@ -11,9 +11,9 @@
 //! 3. Transition QP INIT → RTR (self-loop) → RTS
 //! 4. Post RDMA operations targeting its own MR
 
-use rdmas::rdma::{Context, ProtectionDomain, CompletionQueue, QueuePair, MemoryRegion};
-use rdmas::rdma::qp::{SendWorkRequest, SendWrOpcode, ScatterGatherEntry};
 use rdmas::error::RdmaError;
+use rdmas::rdma::qp::{ScatterGatherEntry, SendWorkRequest, SendWrOpcode};
+use rdmas::rdma::{CompletionQueue, Context, MemoryRegion, ProtectionDomain, QueuePair};
 
 /// Context bundle for benchmark operations.
 pub struct BenchContext {
@@ -31,8 +31,8 @@ const BENCH_BUF_SIZE: usize = 4096;
 
 /// Initialize RDMA resources for self-connected CAS benchmark.
 pub fn setup_rdma() -> Result<BenchContext, RdmaError> {
-    let context = Context::open()
-        .ok_or_else(|| RdmaError::HardwareError("No RDMA device found".into()))?;
+    let context =
+        Context::open().ok_or_else(|| RdmaError::HardwareError("No RDMA device found".into()))?;
 
     eprintln!("Device: {}", context.name());
 
@@ -49,7 +49,12 @@ pub fn setup_rdma() -> Result<BenchContext, RdmaError> {
             | (ibverbs_sys::ibv_access_flags::IBV_ACCESS_REMOTE_ATOMIC as i32),
     )?;
 
-    eprintln!("MR: lkey={:#x}, rkey={:#x}, size={}", mr.lkey(), mr.rkey(), mr.size());
+    eprintln!(
+        "MR: lkey={:#x}, rkey={:#x}, size={}",
+        mr.lkey(),
+        mr.rkey(),
+        mr.size()
+    );
 
     let cq = CompletionQueue::create(&context, 128, std::ptr::null_mut(), std::ptr::null_mut(), 0)?;
 
@@ -57,10 +62,10 @@ pub fn setup_rdma() -> Result<BenchContext, RdmaError> {
         &pd,
         &cq,
         &cq,
-        128,  // max_send_wr
-        128,  // max_recv_wr
-        1,    // max_send_sge
-        1,    // max_recv_sge
+        128, // max_send_wr
+        128, // max_recv_wr
+        1,   // max_send_sge
+        1,   // max_recv_sge
         ibverbs_sys::ibv_qp_type::IBV_QPT_RC,
     )?;
 
@@ -80,7 +85,8 @@ pub fn setup_rdma() -> Result<BenchContext, RdmaError> {
     // RTR (self-loop: remote_qpn = our own qp_num)
     // For RoCE (SoftRoCE), we need GID. Try GID index 0 first,
     // fall back to index 1 if 0 returns null GID.
-    let gid = context.query_gid(1, 1)
+    let gid = context
+        .query_gid(1, 1)
         .or_else(|| context.query_gid(1, 0))
         .ok_or_else(|| RdmaError::HardwareError("no RoCE GID found".into()))?;
     qp.ready_to_receive(qp_num, 0, Some(gid), 1, 0)?;
@@ -123,12 +129,10 @@ pub fn bench_cas_single(ctx: &BenchContext) -> bool {
     };
 
     match ctx.qp.post_send(&mut wr) {
-        Ok(id) => {
-            match ctx.cq.poll(1) {
-                Ok(wcs) => wcs.first().map_or(false, |wc| wc.is_success()),
-                Err(_) => false,
-            }
-        }
+        Ok(id) => match ctx.cq.poll(1) {
+            Ok(wcs) => wcs.first().map_or(false, |wc| wc.is_success()),
+            Err(_) => false,
+        },
         Err(_) => false,
     }
 }
@@ -154,12 +158,10 @@ pub fn bench_read_single(ctx: &BenchContext) -> bool {
     };
 
     match ctx.qp.post_send(&mut wr) {
-        Ok(_id) => {
-            match ctx.cq.poll(1) {
-                Ok(wcs) => wcs.first().map_or(false, |wc| wc.is_success()),
-                Err(_) => false,
-            }
-        }
+        Ok(_id) => match ctx.cq.poll(1) {
+            Ok(wcs) => wcs.first().map_or(false, |wc| wc.is_success()),
+            Err(_) => false,
+        },
         Err(_) => false,
     }
 }
@@ -185,12 +187,10 @@ pub fn bench_write_single(ctx: &BenchContext) -> bool {
     };
 
     match ctx.qp.post_send(&mut wr) {
-        Ok(_id) => {
-            match ctx.cq.poll(1) {
-                Ok(wcs) => wcs.first().map_or(false, |wc| wc.is_success()),
-                Err(_) => false,
-            }
-        }
+        Ok(_id) => match ctx.cq.poll(1) {
+            Ok(wcs) => wcs.first().map_or(false, |wc| wc.is_success()),
+            Err(_) => false,
+        },
         Err(_) => false,
     }
 }

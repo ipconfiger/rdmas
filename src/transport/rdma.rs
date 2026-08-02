@@ -22,7 +22,14 @@ pub struct RdmaTransport {
     cq: Arc<CompletionQueue>,
     next_wr_id: AtomicU64,
     #[allow(dead_code)]
-    pending: Arc<std::sync::Mutex<std::collections::HashMap<u64, tokio::sync::oneshot::Sender<Result<crate::rdma::WorkCompletion, RdmaError>>>>>,
+    pending: Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<
+                u64,
+                tokio::sync::oneshot::Sender<Result<crate::rdma::WorkCompletion, RdmaError>>,
+            >,
+        >,
+    >,
     _poller: Poller,
     _context: Context,
     _pd: ProtectionDomain,
@@ -35,16 +42,7 @@ impl RdmaTransport {
         pd: &ProtectionDomain,
         cq: &Arc<CompletionQueue>,
     ) -> Result<QueuePair, RdmaError> {
-        let mut qp = QueuePair::create(
-            pd,
-            cq,
-            cq,
-            128,
-            128,
-            1,
-            1,
-            ibv_qp_type::IBV_QPT_RC,
-        )?;
+        let mut qp = QueuePair::create(pd, cq, cq, 128, 128, 1, 1, ibv_qp_type::IBV_QPT_RC)?;
 
         let access_flags = (ibv_access_flags::IBV_ACCESS_LOCAL_WRITE as u32)
             | (ibv_access_flags::IBV_ACCESS_REMOTE_WRITE as u32)
@@ -68,18 +66,22 @@ impl RdmaTransport {
 impl Transport for RdmaTransport {
     async fn connect(server_addr: &str) -> Result<Self, RdmaError> {
         // 1. Connect via gRPC to discover server metadata
-        let mut control = ControlClient::connect(server_addr).await
+        let mut control = ControlClient::connect(server_addr)
+            .await
             .map_err(|e| RdmaError::Internal(format!("gRPC connect: {}", e)))?;
-        let _metadata = control.discover().await
+        let _metadata = control
+            .discover()
+            .await
             .map_err(|e| RdmaError::Internal(format!("discover: {}", e)))?;
 
         // 2. Open RDMA device
-        let context = Context::open()
-            .ok_or_else(|| RdmaError::Internal("No RDMA device found".into()))?;
+        let context =
+            Context::open().ok_or_else(|| RdmaError::Internal("No RDMA device found".into()))?;
 
         // 3. Create PD, CQ
         let pd = ProtectionDomain::allocate(&context)?;
-        let cq = CompletionQueue::create(&context, 128, std::ptr::null_mut(), std::ptr::null_mut(), 0)?;
+        let cq =
+            CompletionQueue::create(&context, 128, std::ptr::null_mut(), std::ptr::null_mut(), 0)?;
         let cq = Arc::new(cq);
 
         // 4. Create and initialize QP, wrap in QpGuard
@@ -101,7 +103,13 @@ impl Transport for RdmaTransport {
         })
     }
 
-    async fn read(&self, buf: &mut [u8], lkey: u32, remote_addr: u64, rkey: u32) -> Result<(), RdmaError> {
+    async fn read(
+        &self,
+        buf: &mut [u8],
+        lkey: u32,
+        remote_addr: u64,
+        rkey: u32,
+    ) -> Result<(), RdmaError> {
         let mut wr = SendWorkRequest {
             wr_id: self.next_wr_id.fetch_add(1, Ordering::Relaxed),
             opcode: SendWrOpcode::RdmaRead,
@@ -126,7 +134,13 @@ impl Transport for RdmaTransport {
         Ok(())
     }
 
-    async fn write(&self, buf: &[u8], lkey: u32, remote_addr: u64, rkey: u32) -> Result<(), RdmaError> {
+    async fn write(
+        &self,
+        buf: &[u8],
+        lkey: u32,
+        remote_addr: u64,
+        rkey: u32,
+    ) -> Result<(), RdmaError> {
         let mut wr = SendWorkRequest {
             wr_id: self.next_wr_id.fetch_add(1, Ordering::Relaxed),
             opcode: SendWrOpcode::RdmaWrite,
@@ -151,7 +165,14 @@ impl Transport for RdmaTransport {
         Ok(())
     }
 
-    async fn cas(&self, compare: u64, swap: u64, lkey: u32, remote_addr: u64, rkey: u32) -> Result<bool, RdmaError> {
+    async fn cas(
+        &self,
+        compare: u64,
+        swap: u64,
+        lkey: u32,
+        remote_addr: u64,
+        rkey: u32,
+    ) -> Result<bool, RdmaError> {
         let mut wr = SendWorkRequest {
             wr_id: self.next_wr_id.fetch_add(1, Ordering::Relaxed),
             opcode: SendWrOpcode::RdmaCompareSwap,
@@ -173,8 +194,12 @@ impl Transport for RdmaTransport {
         Ok(!wcs.is_empty() && wcs[0].is_success())
     }
 
-    fn is_rdma(&self) -> bool { true }
-    fn name(&self) -> &'static str { "RDMA" }
+    fn is_rdma(&self) -> bool {
+        true
+    }
+    fn name(&self) -> &'static str {
+        "RDMA"
+    }
 }
 
 #[async_trait]

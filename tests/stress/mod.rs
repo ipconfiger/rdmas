@@ -4,9 +4,9 @@
 //! Default durations are CI-friendly (seconds, not hours). Set the
 //! `STRESS_DURATION_SECS` environment variable to override.
 
-pub mod stability;
 pub mod concurrency;
 pub mod fault_injection;
+pub mod stability;
 pub mod throughput;
 
 /// Shared helper: hash a string key into a [`HashedKey`].

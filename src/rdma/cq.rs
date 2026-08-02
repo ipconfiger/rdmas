@@ -102,16 +102,19 @@ impl CompletionQueue {
             wc_array.set_len(count);
         }
 
-        Ok(wc_array.into_iter().map(|wc| WorkCompletion {
-            wr_id: wc.wr_id,
-            status: wc.status,
-            opcode: wc.opcode,
-            byte_len: wc.byte_len,
-            vendor_err: wc.vendor_err,
-            imm_data: unsafe { wc.__bindgen_anon_1.imm_data },
-            qp_num: wc.qp_num,
-            src_qp: wc.src_qp,
-        }).collect())
+        Ok(wc_array
+            .into_iter()
+            .map(|wc| WorkCompletion {
+                wr_id: wc.wr_id,
+                status: wc.status,
+                opcode: wc.opcode,
+                byte_len: wc.byte_len,
+                vendor_err: wc.vendor_err,
+                imm_data: unsafe { wc.__bindgen_anon_1.imm_data },
+                qp_num: wc.qp_num,
+                src_qp: wc.src_qp,
+            })
+            .collect())
     }
 
     /// Request completion notification on this CQ.
@@ -119,9 +122,7 @@ impl CompletionQueue {
     /// When `solicited_only` is `true`, only solicited completions
     /// (those with `IBV_SEND_SOLICITED` flag) generate an event.
     pub fn request_notification(&self, solicited_only: bool) -> Result<(), RdmaError> {
-        let ret = unsafe {
-            ibv_req_notify_cq_wr(self.inner, solicited_only as libc::c_int)
-        };
+        let ret = unsafe { ibv_req_notify_cq_wr(self.inner, solicited_only as libc::c_int) };
 
         if ret != 0 {
             return Err(RdmaError::HardwareError(format!(

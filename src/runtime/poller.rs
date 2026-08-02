@@ -67,10 +67,7 @@ impl Poller {
     /// A tuple of `(Poller, PendingMap)`. The `PendingMap` must be shared
     /// with the [`crate::runtime::ops::RdmaRuntime`] so it can register
     /// completion waiters.
-    pub fn spawn(
-        cq: Arc<CompletionQueue>,
-        cpu_core: Option<usize>,
-    ) -> (Self, PendingMap) {
+    pub fn spawn(cq: Arc<CompletionQueue>, cpu_core: Option<usize>) -> (Self, PendingMap) {
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let pending_clone = Arc::clone(&pending);
         let cq_clone = Arc::clone(&cq);
@@ -156,9 +153,9 @@ impl Poller {
         self.shutdown.store(true, Ordering::Relaxed);
 
         if let Some(handle) = self.handle.take() {
-            handle.join().map_err(|_| {
-                RdmaError::Internal("RDMA poller thread panicked".to_string())
-            })?;
+            handle
+                .join()
+                .map_err(|_| RdmaError::Internal("RDMA poller thread panicked".to_string()))?;
         }
 
         Ok(())
@@ -293,9 +290,7 @@ impl AsyncPoller {
                 );
 
                 // Create an epoll instance
-                let epoll_fd = unsafe {
-                    libc::epoll_create1(libc::EPOLL_CLOEXEC)
-                };
+                let epoll_fd = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
 
                 if epoll_fd < 0 {
                     tracing::error!(
@@ -312,14 +307,8 @@ impl AsyncPoller {
                     u64: 0,
                 };
 
-                let ret = unsafe {
-                    libc::epoll_ctl(
-                        epoll_fd,
-                        libc::EPOLL_CTL_ADD,
-                        channel_fd,
-                        &mut ev,
-                    )
-                };
+                let ret =
+                    unsafe { libc::epoll_ctl(epoll_fd, libc::EPOLL_CTL_ADD, channel_fd, &mut ev) };
 
                 if ret != 0 {
                     tracing::error!(
@@ -372,10 +361,7 @@ impl AsyncPoller {
                             // Interrupted by signal — continue
                             continue;
                         }
-                        tracing::error!(
-                            err = err.to_string(),
-                            "epoll_wait error in async poller"
-                        );
+                        tracing::error!(err = err.to_string(), "epoll_wait error in async poller");
                         std::thread::sleep(Duration::from_millis(10));
                         continue;
                     }
@@ -404,13 +390,15 @@ impl AsyncPoller {
                         if config.busy_poll_fallback {
                             // Busy-poll fallback: spin on the CQ for a limited window
                             let start = Instant::now();
-                            let deadline = start + Duration::from_millis(config.epoll_timeout_ms as u64);
+                            let deadline =
+                                start + Duration::from_millis(config.epoll_timeout_ms as u64);
 
                             for _ in 0..config.busy_poll_iterations {
                                 if Instant::now() >= deadline {
                                     break;
                                 }
-                                let had_completions = harvest_completions(&cq_clone, &pending_clone);
+                                let had_completions =
+                                    harvest_completions(&cq_clone, &pending_clone);
                                 if !had_completions {
                                     std::hint::spin_loop();
                                 }

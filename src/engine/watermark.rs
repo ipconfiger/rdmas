@@ -190,7 +190,9 @@ mod tests {
         let status = monitor.check(900, 1000, 500_000, 1_000_000, 50, 100);
         assert!(status.any_exceeded);
         assert!(status.exceeded_regions.contains(&"hash_table".to_string()));
-        assert!(!status.exceeded_regions.contains(&"extent_region".to_string()));
+        assert!(!status
+            .exceeded_regions
+            .contains(&"extent_region".to_string()));
         assert!(!status.exceeded_regions.contains(&"slab_region".to_string()));
     }
 
@@ -203,7 +205,9 @@ mod tests {
         let status = monitor.check(500, 1000, 900_000, 1_000_000, 50, 100);
         assert!(status.any_exceeded);
         assert!(!status.exceeded_regions.contains(&"hash_table".to_string()));
-        assert!(status.exceeded_regions.contains(&"extent_region".to_string()));
+        assert!(status
+            .exceeded_regions
+            .contains(&"extent_region".to_string()));
         assert!(!status.exceeded_regions.contains(&"slab_region".to_string()));
     }
 
@@ -216,7 +220,9 @@ mod tests {
         let status = monitor.check(900, 1000, 900_000, 1_000_000, 90, 100);
         assert!(status.any_exceeded);
         assert!(status.exceeded_regions.contains(&"hash_table".to_string()));
-        assert!(status.exceeded_regions.contains(&"extent_region".to_string()));
+        assert!(status
+            .exceeded_regions
+            .contains(&"extent_region".to_string()));
         assert!(status.exceeded_regions.contains(&"slab_region".to_string()));
         assert_eq!(status.exceeded_regions.len(), 3);
     }

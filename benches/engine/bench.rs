@@ -3,16 +3,16 @@
 //! Measures the Cuckoo hashing engine's latency and throughput
 //! across insert, lookup, delete, and concurrent operations.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::time::Duration;
 use xxhash_rust::xxh64::xxh64;
 
-use rdmas::engine::cuckoo::CuckooTable;
-use rdmas::engine::extent::LargeObjectRegion;
-use rdmas::engine::layout::{HashedKey, BucketMode};
-use rdmas::engine::concurrency;
 use rdmas::client::read::ClientReader;
 use rdmas::client::write::{ClientWriter, WriteResult};
+use rdmas::engine::concurrency;
+use rdmas::engine::cuckoo::CuckooTable;
+use rdmas::engine::extent::LargeObjectRegion;
+use rdmas::engine::layout::{BucketMode, HashedKey};
 
 /// Hash a string key for benchmarking.
 fn bench_key(s: &str) -> HashedKey {
@@ -102,17 +102,13 @@ fn bench_extent_alloc(c: &mut Criterion) {
     let sizes = [64usize, 1024, 65536];
 
     for &size in &sizes {
-        group.bench_with_input(
-            BenchmarkId::new("allocate", size),
-            &size,
-            |b, &size| {
-                let data = vec![0xAAu8; size];
-                let mut region = LargeObjectRegion::new(10 * 1024 * 1024);
-                b.iter(|| {
-                    black_box(region.allocate(&data));
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("allocate", size), &size, |b, &size| {
+            let data = vec![0xAAu8; size];
+            let mut region = LargeObjectRegion::new(10 * 1024 * 1024);
+            b.iter(|| {
+                black_box(region.allocate(&data));
+            });
+        });
     }
 
     group.finish();
@@ -125,17 +121,21 @@ fn bench_lock_free_insert(c: &mut Criterion) {
     let sizes = [1024u64, 65536];
 
     for &buckets in &sizes {
-        group.bench_with_input(BenchmarkId::new("insert_lf", buckets), &buckets, |b, &buckets| {
-            b.iter_batched(
-                || CuckooTable::new(buckets, 16),
-                |table| {
-                    let key = bench_key(&format!("lf_{}", rand::random::<u64>()));
-                    let val = 42u64.to_le_bytes();
-                    black_box(table.insert_lock_free(&key, &val, BucketMode::Inline));
-                },
-                criterion::BatchSize::LargeInput,
-            );
-        });
+        group.bench_with_input(
+            BenchmarkId::new("insert_lf", buckets),
+            &buckets,
+            |b, &buckets| {
+                b.iter_batched(
+                    || CuckooTable::new(buckets, 16),
+                    |table| {
+                        let key = bench_key(&format!("lf_{}", rand::random::<u64>()));
+                        let val = 42u64.to_le_bytes();
+                        black_box(table.insert_lock_free(&key, &val, BucketMode::Inline));
+                    },
+                    criterion::BatchSize::LargeInput,
+                );
+            },
+        );
     }
     group.finish();
 }
@@ -146,27 +146,36 @@ fn bench_lock_free_concurrent(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(5));
 
     for &threads in &[1u64, 4, 8] {
-        group.bench_with_input(BenchmarkId::new("insert_lf_threads", threads), &threads, |b, &threads| {
-            let ops_per_thread = 1000u64;
-            b.iter_batched(
-                || std::sync::Arc::new(CuckooTable::new(1 << 18, 16)),
-                |table| {
-                    let handles: Vec<_> = (0..threads).map(|t| {
-                        let table = table.clone();
-                        std::thread::spawn(move || {
-                            for i in 0..ops_per_thread {
-                                let key = bench_key(&format!("lft{}_k{}", t, i));
-                                let val = (t * ops_per_thread + i).to_le_bytes();
-                                let _ = table.insert_lock_free(&key, &val, BucketMode::Inline);
-                            }
-                        })
-                    }).collect();
-                    for h in handles { h.join().unwrap(); }
-                    black_box(table.buckets().len());
-                },
-                criterion::BatchSize::LargeInput,
-            );
-        });
+        group.bench_with_input(
+            BenchmarkId::new("insert_lf_threads", threads),
+            &threads,
+            |b, &threads| {
+                let ops_per_thread = 1000u64;
+                b.iter_batched(
+                    || std::sync::Arc::new(CuckooTable::new(1 << 18, 16)),
+                    |table| {
+                        let handles: Vec<_> = (0..threads)
+                            .map(|t| {
+                                let table = table.clone();
+                                std::thread::spawn(move || {
+                                    for i in 0..ops_per_thread {
+                                        let key = bench_key(&format!("lft{}_k{}", t, i));
+                                        let val = (t * ops_per_thread + i).to_le_bytes();
+                                        let _ =
+                                            table.insert_lock_free(&key, &val, BucketMode::Inline);
+                                    }
+                                })
+                            })
+                            .collect();
+                        for h in handles {
+                            h.join().unwrap();
+                        }
+                        black_box(table.buckets().len());
+                    },
+                    criterion::BatchSize::LargeInput,
+                );
+            },
+        );
     }
     group.finish();
 }
@@ -181,7 +190,9 @@ fn bench_get_fast(c: &mut Criterion) {
     let mut keys: Vec<HashedKey> = Vec::new();
     for i in 0..100_000u64 {
         let hk = bench_key(&format!("gf_{}", i));
-        table.insert(&hk, &i.to_le_bytes(), BucketMode::Inline).unwrap();
+        table
+            .insert(&hk, &i.to_le_bytes(), BucketMode::Inline)
+            .unwrap();
         keys.push(hk);
     }
 
@@ -213,7 +224,9 @@ fn bench_lock_free_lookup(c: &mut Criterion) {
     let mut keys: Vec<HashedKey> = Vec::new();
     for i in 0..100_000u64 {
         let hk = bench_key(&format!("lfl_{}", i));
-        table.insert(&hk, &i.to_le_bytes(), BucketMode::Inline).unwrap();
+        table
+            .insert(&hk, &i.to_le_bytes(), BucketMode::Inline)
+            .unwrap();
         keys.push(hk);
     }
 
@@ -255,25 +268,25 @@ fn bench_concurrent_insert(c: &mut Criterion) {
             |b, &threads| {
                 let ops_per_thread = 1000u64;
                 b.iter_batched(
-                    || {
-                        std::sync::Arc::new(std::sync::Mutex::new(
-                            CuckooTable::new(1 << 18, 16),
-                        ))
-                    },
+                    || std::sync::Arc::new(std::sync::Mutex::new(CuckooTable::new(1 << 18, 16))),
                     |table| {
-                        let handles: Vec<_> = (0..threads).map(|t| {
-                            let table = table.clone();
-                            std::thread::spawn(move || {
-                                for i in 0..ops_per_thread {
-                                    let key_str = format!("t{}_k{}", t, i);
-                                    let hk = bench_key(&key_str);
-                                    let val = (t * ops_per_thread + i).to_le_bytes();
-                                    let mut tbl = table.lock().unwrap();
-                                    let _ = tbl.insert(&hk, &val, BucketMode::Inline);
-                                }
+                        let handles: Vec<_> = (0..threads)
+                            .map(|t| {
+                                let table = table.clone();
+                                std::thread::spawn(move || {
+                                    for i in 0..ops_per_thread {
+                                        let key_str = format!("t{}_k{}", t, i);
+                                        let hk = bench_key(&key_str);
+                                        let val = (t * ops_per_thread + i).to_le_bytes();
+                                        let mut tbl = table.lock().unwrap();
+                                        let _ = tbl.insert(&hk, &val, BucketMode::Inline);
+                                    }
+                                })
                             })
-                        }).collect();
-                        for h in handles { h.join().unwrap(); }
+                            .collect();
+                        for h in handles {
+                            h.join().unwrap();
+                        }
                         black_box(table.lock().unwrap().buckets().len());
                     },
                     criterion::BatchSize::LargeInput,
@@ -305,8 +318,12 @@ fn bench_write_kick_chain(c: &mut Criterion) {
                         let key = bench_key(&format!("kick_{}", rand::random::<u64>()));
                         let val = rand::random::<u64>().to_le_bytes();
                         let result = ClientWriter::insert(
-                            &key, &val, BucketMode::Inline,
-                            &mut buckets_mut, None, buckets,
+                            &key,
+                            &val,
+                            BucketMode::Inline,
+                            &mut buckets_mut,
+                            None,
+                            buckets,
                         );
                         black_box(result);
                     },
@@ -324,7 +341,12 @@ criterion_group!(lookup, bench_lookup_hit);
 criterion_group!(extent, bench_extent_alloc);
 criterion_group!(concurrent, bench_concurrent_insert);
 criterion_group!(kick, bench_write_kick_chain);
-criterion_group!(lock_free, bench_lock_free_insert, bench_lock_free_concurrent, bench_lock_free_lookup);
+criterion_group!(
+    lock_free,
+    bench_lock_free_insert,
+    bench_lock_free_concurrent,
+    bench_lock_free_lookup
+);
 criterion_group!(fast_path, bench_get_fast);
 criterion_group!(table_init, bench_table_new);
 criterion_main!(insert, lookup, extent, concurrent, kick, lock_free, fast_path, table_init);

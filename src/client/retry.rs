@@ -64,10 +64,7 @@ impl Default for RetryConfig {
 ///
 /// * `Ok(result)` — the operation succeeded (possibly after retries).
 /// * `Err(error)` — all retries exhausted; the last error is returned.
-pub fn retry_with_backoff<T, F, E>(
-    config: &RetryConfig,
-    mut operation: F,
-) -> Result<T, E>
+pub fn retry_with_backoff<T, F, E>(config: &RetryConfig, mut operation: F) -> Result<T, E>
 where
     F: FnMut() -> Result<T, E>,
     E: std::fmt::Debug,
@@ -90,9 +87,8 @@ where
 
                 // Add jitter: ±25 %.
                 let jitter = (delay.as_micros() as f64 * 0.25 * rng.gen_range(-1.0..1.0)) as i64;
-                let final_delay = Duration::from_micros(
-                    (delay.as_micros() as i64 + jitter).max(0) as u64,
-                );
+                let final_delay =
+                    Duration::from_micros((delay.as_micros() as i64 + jitter).max(0) as u64);
 
                 std::thread::sleep(final_delay);
             }
@@ -108,10 +104,7 @@ where
 /// Retriable errors ([`RdmaError::Timeout`], [`RdmaError::CasFailed`],
 /// [`RdmaError::VersionMismatch`], [`RdmaError::NotConnected`]) trigger
 /// exponential backoff with jitter up to `max_retries` attempts.
-pub fn retry_rdma_op<T, F>(
-    config: &RetryConfig,
-    mut operation: F,
-) -> Result<T, RdmaError>
+pub fn retry_rdma_op<T, F>(config: &RetryConfig, mut operation: F) -> Result<T, RdmaError>
 where
     F: FnMut() -> Result<T, RdmaError>,
 {
@@ -131,9 +124,8 @@ where
                 let delay = delay.min(config.max_delay);
 
                 let jitter = (delay.as_micros() as f64 * 0.25 * rng.gen_range(-1.0..1.0)) as i64;
-                let final_delay = Duration::from_micros(
-                    (delay.as_micros() as i64 + jitter).max(0) as u64,
-                );
+                let final_delay =
+                    Duration::from_micros((delay.as_micros() as i64 + jitter).max(0) as u64);
 
                 std::thread::sleep(final_delay);
             }
@@ -265,9 +257,7 @@ mod tests {
             max_retries: 2,
             ..Default::default()
         };
-        let result = retry_with_backoff(&config, || -> Result<i32, &str> {
-            Err("always fail")
-        });
+        let result = retry_with_backoff(&config, || -> Result<i32, &str> { Err("always fail") });
         assert!(result.is_err());
     }
 

@@ -135,7 +135,7 @@ fn test_concurrent_insert_lookup() {
 
 #[test]
 fn test_stress_100k() {
-    let mut table = CuckooTable::new(1 << 20, 16);  // 1048576 buckets, >10x headroom
+    let mut table = CuckooTable::new(1 << 20, 16); // 1048576 buckets, >10x headroom
     let count = 100_000u64;
 
     // Insert
@@ -224,11 +224,11 @@ fn test_extent_gc_sweep() {
 fn test_slab_with_engine() {
     // Create engine with slab support: 64-byte chunks, 10 total chunks.
     let mut engine = BootstrappedEngine::bootstrap_with_slab(
-        64,            // buckets
-        1024,          // large object region
-        16,            // max_kick
-        64,            // slab chunk size
-        640,           // slab region (10 chunks × 64 bytes)
+        64,   // buckets
+        1024, // large object region
+        16,   // max_kick
+        64,   // slab chunk size
+        640,  // slab region (10 chunks × 64 bytes)
     );
 
     assert_eq!(engine.slab_chunk_count(), 10);
@@ -262,8 +262,7 @@ fn test_slab_with_engine() {
 #[test]
 fn test_slab_full_engine_capacity() {
     let mut engine = BootstrappedEngine::bootstrap_with_slab(
-        64, 1024, 16,
-        128,  // chunk size
+        64, 1024, 16, 128,  // chunk size
         1280, // 10 chunks
     );
 
@@ -287,9 +286,11 @@ fn test_slab_full_engine_capacity() {
 #[test]
 fn test_slab_write_and_read_within_chunks() {
     let mut engine = BootstrappedEngine::bootstrap_with_slab(
-        64, 1024, 16,
-        256,       // 256-byte chunks
-        256 * 4,   // 4 chunks
+        64,
+        1024,
+        16,
+        256,     // 256-byte chunks
+        256 * 4, // 4 chunks
     );
 
     // Allocate all 4 chunks

@@ -31,7 +31,10 @@ impl BackupStore {
 
     /// Enqueue a write for async replication.
     pub fn enqueue_write(&self, offset: u64, data: &[u8]) {
-        self.pending.lock().unwrap().push_back((offset, data.to_vec()));
+        self.pending
+            .lock()
+            .unwrap()
+            .push_back((offset, data.to_vec()));
     }
 
     /// Replicate all pending writes to the backup.
@@ -84,12 +87,7 @@ impl ReplicationManager {
     }
 
     /// Write data and schedule async replication.
-    pub fn write_with_replication(
-        &self,
-        offset: u64,
-        data: &[u8],
-        local_store: &mut [u8],
-    ) {
+    pub fn write_with_replication(&self, offset: u64, data: &[u8], local_store: &mut [u8]) {
         // Write locally first
         let end = (offset as usize + data.len()).min(local_store.len());
         local_store[offset as usize..end].copy_from_slice(&data[..end - offset as usize]);

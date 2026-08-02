@@ -92,7 +92,11 @@ struct DecodedHeader {
 
 impl DecodedHeader {
     fn header_size(&self) -> usize {
-        if self.is_v2 { 32 } else { 24 }
+        if self.is_v2 {
+            32
+        } else {
+            24
+        }
     }
 }
 
@@ -229,7 +233,9 @@ impl LargeObjectRegion {
             return Err(ExtentError::NotAllocated);
         }
 
-        let decoded = self.read_decoded_header(offset).ok_or(ExtentError::InvalidOffset)?;
+        let decoded = self
+            .read_decoded_header(offset)
+            .ok_or(ExtentError::InvalidOffset)?;
         if decoded.magic != EXTENT_MAGIC {
             return Err(ExtentError::InvalidMagic);
         }
@@ -263,7 +269,9 @@ impl LargeObjectRegion {
     pub fn mark_for_gc(&mut self, offset: u64, epoch: u64) -> Result<(), ExtentError> {
         // Read the header to validate magic before mutating.
         {
-            let decoded = self.read_decoded_header(offset).ok_or(ExtentError::InvalidOffset)?;
+            let decoded = self
+                .read_decoded_header(offset)
+                .ok_or(ExtentError::InvalidOffset)?;
             if decoded.magic != EXTENT_MAGIC {
                 return Err(ExtentError::InvalidMagic);
             }
@@ -290,12 +298,12 @@ impl LargeObjectRegion {
             if let Some(decoded) = self.read_decoded_header(offset) {
                 // Only sweep extents explicitly marked for GC (epoch > 0).
                 if decoded.epoch_mark > 0 && decoded.epoch_mark < min_active_epoch {
-        let total_len = if decoded.is_v2 {
-            extent_total(decoded.data_len)
-        } else {
-            // V1: 24-byte header, no 8-byte alignment padding
-            24 + decoded.data_len
-        };
+                    let total_len = if decoded.is_v2 {
+                        extent_total(decoded.data_len)
+                    } else {
+                        // V1: 24-byte header, no 8-byte alignment padding
+                        24 + decoded.data_len
+                    };
                     // Zero the magic to prevent stale reads after sweeping.
                     self.zero_magic(offset);
                     self.free_list.push_back((offset, total_len));
@@ -377,13 +385,10 @@ impl LargeObjectRegion {
 
         // --- Try V1 layout first (magic at offset 16) ---
         if off + 24 <= self.buffer.len() {
-            let magic_v1 = u32::from_le_bytes(
-                self.buffer[off + 16..off + 20].try_into().ok()?,
-            );
+            let magic_v1 = u32::from_le_bytes(self.buffer[off + 16..off + 20].try_into().ok()?);
             if magic_v1 == EXTENT_MAGIC {
                 // V1 format confirmed.
-                let data_len =
-                    u64::from_le_bytes(self.buffer[off..off + 8].try_into().ok()?);
+                let data_len = u64::from_le_bytes(self.buffer[off..off + 8].try_into().ok()?);
                 let epoch_mark =
                     u64::from_le_bytes(self.buffer[off + 8..off + 16].try_into().ok()?);
                 return Some(DecodedHeader {
@@ -417,8 +422,7 @@ impl LargeObjectRegion {
                     if off + 24 > self.buffer.len() {
                         return None;
                     }
-                    let data_len =
-                        u64::from_le_bytes(self.buffer[off..off + 8].try_into().ok()?);
+                    let data_len = u64::from_le_bytes(self.buffer[off..off + 8].try_into().ok()?);
                     let epoch_mark =
                         u64::from_le_bytes(self.buffer[off + 8..off + 16].try_into().ok()?);
                     Some(DecodedHeader {
@@ -434,13 +438,9 @@ impl LargeObjectRegion {
                         return None;
                     }
                     let data_len =
-                        u32::from_le_bytes(
-                            self.buffer[off + 8..off + 12].try_into().ok()?,
-                        ) as u64;
+                        u32::from_le_bytes(self.buffer[off + 8..off + 12].try_into().ok()?) as u64;
                     let epoch_mark =
-                        u64::from_le_bytes(
-                            self.buffer[off + 16..off + 24].try_into().ok()?,
-                        );
+                        u64::from_le_bytes(self.buffer[off + 16..off + 24].try_into().ok()?);
                     Some(DecodedHeader {
                         magic,
                         data_len,
@@ -501,7 +501,7 @@ impl LargeObjectRegion {
         self.buffer[off + 8..off + 16].copy_from_slice(&0u64.to_le_bytes()); // epoch_mark
         self.buffer[off + 16..off + 20].copy_from_slice(&EXTENT_MAGIC.to_le_bytes());
         self.buffer[off + 20..off + 24].copy_from_slice(&[0u8; 4]); // _pad
-        // version byte at off+4 is 0 (zeroed by buffer init) → decoded as V1
+                                                                    // version byte at off+4 is 0 (zeroed by buffer init) → decoded as V1
         self.buffer[off + header_size as usize..off + header_size as usize + data.len()]
             .copy_from_slice(data);
 
@@ -672,7 +672,12 @@ impl DistributedExtentAllocator {
         let checksum_bytes = checksum.to_le_bytes();
         let checksum_addr = extent_addr + 24; // checksum is at offset 24 in ExtentHeaderV2
         self.transport
-            .write(&checksum_bytes, self.local_lkey, checksum_addr, self.free_list_rkey)
+            .write(
+                &checksum_bytes,
+                self.local_lkey,
+                checksum_addr,
+                self.free_list_rkey,
+            )
             .await?;
 
         Ok(old_offset)
@@ -757,7 +762,9 @@ mod tests {
     #[test]
     fn test_allocate_exact_fit() {
         let mut region = LargeObjectRegion::new(HEADER_SIZE as usize + 16);
-        let offset = region.allocate(&vec![0u8; 16]).expect("exact fit should succeed");
+        let offset = region
+            .allocate(&vec![0u8; 16])
+            .expect("exact fit should succeed");
         assert_eq!(region.read(offset).unwrap().len(), 16);
         // No space left
         assert!(region.allocate(&[0u8]).is_none());
@@ -813,7 +820,11 @@ mod tests {
         let data_small = vec![0xBBu8; 100];
         let off_small = region.allocate(&data_small).unwrap();
         assert_eq!(off_small, off_big);
-        assert_eq!(region.free_list_len(), 1, "remainder should be in free list");
+        assert_eq!(
+            region.free_list_len(),
+            1,
+            "remainder should be in free list"
+        );
 
         // The remainder can be used for another allocation
         let data_med = vec![0xCCu8; 200];
@@ -893,10 +904,7 @@ mod tests {
         let off = region.allocate(b"test").unwrap();
         // Corrupt magic (byte 0 in V2).
         region.buffer[off as usize..off as usize + 4].copy_from_slice(&[0; 4]);
-        assert_eq!(
-            region.mark_for_gc(off, 42),
-            Err(ExtentError::InvalidMagic)
-        );
+        assert_eq!(region.mark_for_gc(off, 42), Err(ExtentError::InvalidMagic));
     }
 
     // -----------------------------------------------------------------------
@@ -915,7 +923,10 @@ mod tests {
         // Sweep with min_active_epoch=150: toss (epoch 100) < 150, keep (200) >= 150
         let freed = region.sweep(150);
         assert_eq!(freed, 1);
-        assert!(region.read(toss).is_none(), "tossed extent magic may still be readable but free-list reuse should reclaim it");
+        assert!(
+            region.read(toss).is_none(),
+            "tossed extent magic may still be readable but free-list reuse should reclaim it"
+        );
         assert_eq!(region.read(keep).unwrap(), b"keep me");
         assert_eq!(region.free_list_len(), 1);
     }
@@ -989,7 +1000,10 @@ mod tests {
         region.allocate(&vec![0u8; 8]).unwrap();
 
         let ratio = region.fragmentation_ratio();
-        assert!((ratio - 1.0).abs() < 1e-9, "fully packed should be ~1.0, got {ratio}");
+        assert!(
+            (ratio - 1.0).abs() < 1e-9,
+            "fully packed should be ~1.0, got {ratio}"
+        );
     }
 
     #[test]
@@ -1115,10 +1129,15 @@ mod tests {
         let mut region = LargeObjectRegion::new(1024);
         let data = b"V1 legacy data".to_vec();
 
-        let offset = region.write_extent_v1(&data).expect("V1 write should succeed");
+        let offset = region
+            .write_extent_v1(&data)
+            .expect("V1 write should succeed");
         let read_back = region.read(offset).expect("should read V1 extent");
 
-        assert_eq!(read_back, data, "V1 data should be readable through migration path");
+        assert_eq!(
+            read_back, data,
+            "V1 data should be readable through migration path"
+        );
     }
 
     /// Write a V1 extent, free it, re-allocate with V2, verify both paths work.
@@ -1178,7 +1197,10 @@ mod tests {
         let stored_checksum = region
             .read_checksum(offset)
             .expect("should read checksum from V2 header");
-        assert_eq!(stored_checksum, expected_checksum, "stored checksum should match XXH64");
+        assert_eq!(
+            stored_checksum, expected_checksum,
+            "stored checksum should match XXH64"
+        );
     }
 
     /// V2 with checksum=0 (write-in-progress sentinel) should still be
@@ -1230,9 +1252,18 @@ mod tests {
         // accessible and the version byte indicates V2).
         // read_checksum returns None for non-V2 headers, so if it returns
         // Some, the header is V2.
-        assert!(region.read_checksum(o1).is_some(), "allocation should be V2");
-        assert!(region.read_checksum(o2).is_some(), "allocation should be V2");
-        assert!(region.read_checksum(o3).is_some(), "allocation should be V2");
+        assert!(
+            region.read_checksum(o1).is_some(),
+            "allocation should be V2"
+        );
+        assert!(
+            region.read_checksum(o2).is_some(),
+            "allocation should be V2"
+        );
+        assert!(
+            region.read_checksum(o3).is_some(),
+            "allocation should be V2"
+        );
     }
 
     /// Edge case: V1 format with maximal data_len, verify it decodes.
@@ -1263,6 +1294,9 @@ mod tests {
         let mut region = LargeObjectRegion::new(1024);
         let offset = region.write_extent_v1(b"v1 data").unwrap();
         let checksum = region.read_checksum(offset);
-        assert!(checksum.is_none(), "V1 extents should not have a V2 checksum field");
+        assert!(
+            checksum.is_none(),
+            "V1 extents should not have a V2 checksum field"
+        );
     }
 }

@@ -198,10 +198,8 @@ impl RDMANativeConnector {
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let closed_flag = Arc::new(AtomicBool::new(false));
-        let pending: Arc<Mutex<HashMap<u64, PendingOp>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let completions: Arc<Mutex<Vec<Completion>>> =
-            Arc::new(Mutex::new(Vec::new()));
+        let pending: Arc<Mutex<HashMap<u64, PendingOp>>> = Arc::new(Mutex::new(HashMap::new()));
+        let completions: Arc<Mutex<Vec<Completion>>> = Arc::new(Mutex::new(Vec::new()));
 
         // Create an eventfd for completion notification.
         // EFD_NONBLOCK so reads in the demux thread return EAGAIN when empty.
@@ -238,17 +236,13 @@ impl RDMANativeConnector {
             String,
             Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
         ) = {
-            let hb: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>> =
-                Arc::new(Mutex::new(None));
+            let hb: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
 
             if let Some(ref params) = adapter_params {
                 if let Some(director_addr) = params.get("director_addr") {
-                    let node_id =
-                        params.get("node_id").map(|s| s.as_str()).unwrap_or("");
-                    let tenant_id =
-                        params.get("tenant_id").map(|s| s.as_str()).unwrap_or("");
-                    let model_name =
-                        params.get("model_name").map(|s| s.as_str()).unwrap_or("");
+                    let node_id = params.get("node_id").map(|s| s.as_str()).unwrap_or("");
+                    let tenant_id = params.get("tenant_id").map(|s| s.as_str()).unwrap_or("");
+                    let model_name = params.get("model_name").map(|s| s.as_str()).unwrap_or("");
                     let block_size: u32 = params
                         .get("block_size")
                         .and_then(|s| s.parse().ok())
@@ -257,22 +251,16 @@ impl RDMANativeConnector {
                     // ── Parse new adapter_params fields ──
 
                     // instance_id: auto-generated if not provided.
-                    let instance_id = params
-                        .get("instance_id")
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            let ts = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_micros();
-                            format!("{}-{:x}", node_id, ts)
-                        });
+                    let instance_id = params.get("instance_id").cloned().unwrap_or_else(|| {
+                        let ts = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_micros();
+                        format!("{}-{:x}", node_id, ts)
+                    });
 
                     // role: default "both", accepts "prefill"/"decode"/"both".
-                    let role_str = params
-                        .get("role")
-                        .map(|s| s.as_str())
-                        .unwrap_or("both");
+                    let role_str = params.get("role").map(|s| s.as_str()).unwrap_or("both");
                     let role: i32 = match role_str.to_lowercase().as_str() {
                         "prefill" => InstanceRole::Prefill as i32,
                         "decode" => InstanceRole::Decode as i32,
@@ -321,9 +309,7 @@ impl RDMANativeConnector {
                                         }
                                     }
                                     Err(e) => {
-                                        tracing::warn!(
-                                            "Failed to register with Director: {e}"
-                                        );
+                                        tracing::warn!("Failed to register with Director: {e}");
                                     }
                                 }
                             }
@@ -335,19 +321,14 @@ impl RDMANativeConnector {
                                 let hb_shutdown = shutdown.clone();
                                 let hb_handle = di.handle().spawn(async move {
                                     loop {
-                                        tokio::time::sleep(
-                                            std::time::Duration::from_secs(10),
-                                        )
-                                        .await;
+                                        tokio::time::sleep(std::time::Duration::from_secs(10))
+                                            .await;
                                         if hb_shutdown.load(Ordering::Relaxed) {
                                             break;
                                         }
-                                        if let Err(e) =
-                                            hb_director.heartbeat(&hb_instance_id).await
+                                        if let Err(e) = hb_director.heartbeat(&hb_instance_id).await
                                         {
-                                            tracing::warn!(
-                                                "Director heartbeat failed: {e}"
-                                            );
+                                            tracing::warn!("Director heartbeat failed: {e}");
                                         }
                                     }
                                 });
@@ -358,9 +339,9 @@ impl RDMANativeConnector {
                         }
                         Err(e) => {
                             tracing::error!("Failed to connect to Director: {e}");
-                            return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                                format!("Director connection failed: {e}"),
-                            ));
+                            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "Director connection failed: {e}"
+                            )));
                         }
                     }
                 } else {
@@ -521,9 +502,7 @@ impl RDMANativeConnector {
                 };
 
                 let ok = match mode {
-                    BucketMode::Inline => {
-                        table.insert(&hk, &data, BucketMode::Inline).is_ok()
-                    }
+                    BucketMode::Inline => table.insert(&hk, &data, BucketMode::Inline).is_ok(),
                     BucketMode::Extent => {
                         if let Some(offset) = large_objects.allocate(&data) {
                             table.insert_extent(&hk, offset, data.len() as u64).is_ok()
@@ -560,7 +539,8 @@ impl RDMANativeConnector {
                     });
                     if data.len() > 32 {
                         if let Some(offset) = large_objects.allocate(&data) {
-                            results[i] = table.insert_extent(&hk, offset, data.len() as u64).is_ok();
+                            results[i] =
+                                table.insert_extent(&hk, offset, data.len() as u64).is_ok();
                         }
                     }
                 }
@@ -716,9 +696,7 @@ impl RDMANativeConnector {
 
             // Deregister from the Director (best-effort, don't block).
             if let Some(ref di) = self.director {
-                let _ = di
-                    .handle()
-                    .block_on(di.deregister(&self.instance_id));
+                let _ = di.handle().block_on(di.deregister(&self.instance_id));
             }
         }
 
@@ -794,13 +772,7 @@ impl RDMANativeConnector {
         // Using a u64 counter value; the demux thread should call
         // eventfd_read to consume notifications.
         let buf: u64 = 1;
-        let _ = unsafe {
-            libc::write(
-                self.event_fd,
-                &buf as *const u64 as *const libc::c_void,
-                8,
-            )
-        };
+        let _ = unsafe { libc::write(self.event_fd, &buf as *const u64 as *const libc::c_void, 8) };
     }
 }
 
@@ -823,9 +795,7 @@ impl Drop for RDMANativeConnector {
                 }
                 // Best-effort deregister.
                 if let Some(ref di) = self.director {
-                    let _ = di
-                        .handle()
-                        .block_on(di.deregister(&self.instance_id));
+                    let _ = di.handle().block_on(di.deregister(&self.instance_id));
                 }
             }
 
@@ -892,7 +862,10 @@ mod tests {
     fn test_hash_different_keys_produce_different_hashes() {
         let h1 = hash_lmcache_key("key_a");
         let h2 = hash_lmcache_key("key_b");
-        assert_ne!(h1.hash, h2.hash, "different keys should (almost always) hash differently");
+        assert_ne!(
+            h1.hash, h2.hash,
+            "different keys should (almost always) hash differently"
+        );
     }
 
     #[test]
@@ -976,9 +949,7 @@ mod tests {
         let keys: Vec<String> = vec!["get_test_key".into()];
 
         Python::with_gil(|py| {
-            let mvs: Vec<PyObject> = vec![
-                pyo3::types::PyBytes::new(py, b"get_test_value").into(),
-            ];
+            let mvs: Vec<PyObject> = vec![pyo3::types::PyBytes::new(py, b"get_test_value").into()];
             connector.submit_batch_set(keys.clone(), mvs);
         });
 
@@ -1002,9 +973,7 @@ mod tests {
         let keys: Vec<String> = vec!["del_key".into()];
 
         Python::with_gil(|py| {
-            let mvs: Vec<PyObject> = vec![
-                pyo3::types::PyBytes::new(py, b"value_to_delete").into(),
-            ];
+            let mvs: Vec<PyObject> = vec![pyo3::types::PyBytes::new(py, b"value_to_delete").into()];
             connector.submit_batch_set(keys.clone(), mvs);
         });
 
@@ -1016,7 +985,11 @@ mod tests {
             .iter()
             .find(|(fid, _, _, _)| *fid == fid_del)
             .expect("delete completion not found");
-        assert_eq!(del_result.3, Some(vec![true]), "delete of existing key should succeed");
+        assert_eq!(
+            del_result.3,
+            Some(vec![true]),
+            "delete of existing key should succeed"
+        );
 
         let exists_result = completions
             .iter()
@@ -1045,7 +1018,11 @@ mod tests {
             .find(|(f, _, _, _)| *f == fid)
             .expect("completion not found");
 
-        assert_eq!(result.3, Some(vec![false]), "deleting nonexistent key should return false");
+        assert_eq!(
+            result.3,
+            Some(vec![false]),
+            "deleting nonexistent key should return false"
+        );
         connector.close();
     }
 
@@ -1062,13 +1039,7 @@ mod tests {
 
         // Read from eventfd to verify it was written to.
         let mut val: u64 = 0;
-        let ret = unsafe {
-            libc::read(
-                fd as i32,
-                &mut val as *mut u64 as *mut libc::c_void,
-                8,
-            )
-        };
+        let ret = unsafe { libc::read(fd as i32, &mut val as *mut u64 as *mut libc::c_void, 8) };
         assert!(ret >= 0, "reading eventfd should succeed");
         assert!(val > 0, "eventfd should have been written to");
 
@@ -1096,9 +1067,7 @@ mod tests {
         let keys: Vec<String> = vec!["large_key".into()];
 
         Python::with_gil(|py| {
-            let mvs: Vec<PyObject> = vec![
-                pyo3::types::PyBytes::new(py, &large_value).into(),
-            ];
+            let mvs: Vec<PyObject> = vec![pyo3::types::PyBytes::new(py, &large_value).into()];
             connector.submit_batch_set(keys.clone(), mvs);
         });
 

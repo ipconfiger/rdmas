@@ -89,8 +89,7 @@ impl LruTracker {
                 la.insert(*key_hash, *ts);
             }
             // Update approximate key_count to reflect deduplicated set size.
-            self.key_count
-                .store(la.len() as u64, Ordering::Relaxed);
+            self.key_count.store(la.len() as u64, Ordering::Relaxed);
 
             // If map is empty or n == 0, nothing to evict.
             if la.is_empty() || n == 0 {
@@ -110,8 +109,7 @@ impl LruTracker {
             }
 
             // Update count after removal.
-            self.key_count
-                .store(la.len() as u64, Ordering::Relaxed);
+            self.key_count.store(la.len() as u64, Ordering::Relaxed);
 
             candidates
         }
@@ -188,9 +186,7 @@ mod tests {
         // We push them directly into accesses to control ordering.
         tracker.accesses.push((1, 100));
         tracker.accesses.push((2, 200));
-        tracker
-            .key_count
-            .store(2, Ordering::Relaxed);
+        tracker.key_count.store(2, Ordering::Relaxed);
 
         let candidates = tracker.select_eviction_candidates(1);
         assert_eq!(candidates.len(), 1);
@@ -222,9 +218,7 @@ mod tests {
         let tracker = LruTracker::new(100);
         tracker.accesses.push((10, 10));
         tracker.accesses.push((20, 20));
-        tracker
-            .key_count
-            .store(2, Ordering::Relaxed);
+        tracker.key_count.store(2, Ordering::Relaxed);
         let candidates = tracker.select_eviction_candidates(100);
         // Only 2 keys exist.
         assert_eq!(candidates.len(), 2);

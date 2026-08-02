@@ -77,10 +77,7 @@ impl HugePageRegion {
     /// (local write + remote read/write/atomic).
     ///
     /// `size` is rounded up to the nearest 2MB boundary.
-    pub fn allocate(
-        size: usize,
-        pd: &ProtectionDomain,
-    ) -> Result<Self, RdmaError> {
+    pub fn allocate(size: usize, pd: &ProtectionDomain) -> Result<Self, RdmaError> {
         Self::allocate_with_access(size, pd, DEFAULT_ACCESS)
     }
 
@@ -102,10 +99,7 @@ impl HugePageRegion {
                 ptr::null_mut(),
                 rounded,
                 libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE
-                    | libc::MAP_ANONYMOUS
-                    | libc::MAP_HUGETLB
-                    | libc::MAP_POPULATE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_HUGETLB | libc::MAP_POPULATE,
                 -1, // fd (ignored for MAP_ANONYMOUS)
                 0,  // offset
             )
@@ -145,12 +139,8 @@ impl HugePageRegion {
         );
 
         // Step 3: Register with RDMA
-        let mr = crate::rdma::MemoryRegion::register(
-            pd,
-            ptr as *mut libc::c_void,
-            rounded,
-            access,
-        )?;
+        let mr =
+            crate::rdma::MemoryRegion::register(pd, ptr as *mut libc::c_void, rounded, access)?;
 
         Ok(Self {
             ptr,

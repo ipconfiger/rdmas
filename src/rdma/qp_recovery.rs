@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex};
 use ibverbs_sys::*;
 
 use crate::error::RdmaError;
-use crate::rdma::qp::{QueuePair, SendWorkRequest, RecvWorkRequest};
+use crate::rdma::qp::{QueuePair, RecvWorkRequest, SendWorkRequest};
 
 /// A guarded QueuePair that checks QP health before each post operation.
 ///
@@ -66,30 +66,18 @@ impl QpGuard {
     ///
     /// This is a synchronous FFI call that blocks until the query completes.
     pub fn check_health(&self) -> Result<(), RdmaError> {
-        let mut attr: ibv_qp_attr = unsafe {
-            std::mem::MaybeUninit::zeroed().assume_init()
-        };
+        let mut attr: ibv_qp_attr = unsafe { std::mem::MaybeUninit::zeroed().assume_init() };
 
-        let mut init_attr: ibv_qp_init_attr = unsafe {
-            std::mem::MaybeUninit::zeroed().assume_init()
-        };
+        let mut init_attr: ibv_qp_init_attr =
+            unsafe { std::mem::MaybeUninit::zeroed().assume_init() };
 
         let attr_mask = ibv_qp_attr_mask::IBV_QP_STATE as libc::c_int;
 
-        let ret = unsafe {
-            ibv_query_qp(
-                self.qp.as_ptr(),
-                &mut attr,
-                attr_mask,
-                &mut init_attr,
-            )
-        };
+        let ret = unsafe { ibv_query_qp(self.qp.as_ptr(), &mut attr, attr_mask, &mut init_attr) };
 
         if ret != 0 {
-            let err = RdmaError::HardwareError(format!(
-                "ibv_query_qp failed with return code {}",
-                ret
-            ));
+            let err =
+                RdmaError::HardwareError(format!("ibv_query_qp failed with return code {}", ret));
             if let Ok(mut last) = self.last_error.lock() {
                 *last = Some(err.clone());
             }
@@ -98,10 +86,7 @@ impl QpGuard {
 
         match attr.cur_qp_state {
             ibv_qp_state::IBV_QPS_ERR | ibv_qp_state::IBV_QPS_UNKNOWN => {
-                let err = RdmaError::HardwareError(format!(
-                    "QP in {:?} state",
-                    attr.cur_qp_state
-                ));
+                let err = RdmaError::HardwareError(format!("QP in {:?} state", attr.cur_qp_state));
                 if let Ok(mut last) = self.last_error.lock() {
                     *last = Some(err.clone());
                 }
@@ -146,24 +131,14 @@ impl QpGuard {
     /// Returns the current `ibv_qp_state` on success, or an error if
     /// `ibv_query_qp` itself failed.
     pub fn query_state(&self) -> Result<ibv_qp_state, RdmaError> {
-        let mut attr: ibv_qp_attr = unsafe {
-            std::mem::MaybeUninit::zeroed().assume_init()
-        };
+        let mut attr: ibv_qp_attr = unsafe { std::mem::MaybeUninit::zeroed().assume_init() };
 
-        let mut init_attr: ibv_qp_init_attr = unsafe {
-            std::mem::MaybeUninit::zeroed().assume_init()
-        };
+        let mut init_attr: ibv_qp_init_attr =
+            unsafe { std::mem::MaybeUninit::zeroed().assume_init() };
 
         let attr_mask = ibv_qp_attr_mask::IBV_QP_STATE as libc::c_int;
 
-        let ret = unsafe {
-            ibv_query_qp(
-                self.qp.as_ptr(),
-                &mut attr,
-                attr_mask,
-                &mut init_attr,
-            )
-        };
+        let ret = unsafe { ibv_query_qp(self.qp.as_ptr(), &mut attr, attr_mask, &mut init_attr) };
 
         if ret != 0 {
             return Err(RdmaError::HardwareError(format!(
